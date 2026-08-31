@@ -290,6 +290,10 @@ class CliAgentExecutor(AgentExecutor):
                                     f"a2a://{self.name}/{ctx_id}"))
 
         env = os.environ.copy()
+        # Let the CLI (and its subagents) know who and where it is, e.g. so
+        # a2a-mcp `post` can self-identify its sender.
+        env["A2A_AGENT"] = self.name
+        env["A2A_CONTEXT"] = ctx_id
         if self.cfg.get("env_from_pass"):
             env.update(await asyncio.to_thread(
                 resolve_pass_env, self.cfg["env_from_pass"]))
