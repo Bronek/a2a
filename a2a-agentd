@@ -213,10 +213,16 @@ class CliAgentExecutor(AgentExecutor):
         migrated = False
         for ctx, val in list(self.sessions.items()):
             if isinstance(val, str):  # legacy schema: bare native session id
-                wd = self.legacy_workdir
+                # Before per-context pinning every context ran in
+                # cfg["workdir"], which itself defaulted to ~. That default
+                # IS the directory these sessions were created in, so a
+                # config without an explicit workdir must migrate to ~ —
+                # migrating to None would discard a real pin, and the flush
+                # below would make the loss permanent.
+                wd = self.legacy_workdir or "~"
                 self.sessions[ctx] = {
                     "session": val,
-                    "workdir": str(Path(wd).expanduser()) if wd else None,
+                    "workdir": str(Path(wd).expanduser().resolve()),
                 }
                 migrated = True
         if migrated:
@@ -302,6 +308,15 @@ class CliAgentExecutor(AgentExecutor):
             # back to resuming it.
             native = str(uuid.uuid5(uuid.NAMESPACE_URL,
                                     f"a2a://{self.name}/{ctx_id}"))
+        if entry is None:
+            # Record the pin before running the turn, not after it succeeds:
+            # the CLI may create its session and then fail on output we
+            # cannot parse, and a context left unpinned by that failure would
+            # accept a different directory next time — pointing a native
+            # session id at a directory whose store cannot see it.
+            entry = {"session": native, "workdir": workdir}
+            self.sessions[ctx_id] = entry
+            self.save_state()
 
         env = os.environ.copy()
         # Let the CLI (and its subagents) know who and where it is, e.g. so
