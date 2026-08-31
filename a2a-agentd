@@ -196,20 +196,38 @@ class CliAgentExecutor(AgentExecutor):
         # ones reached through a symlink.
         self.trusted_workdirs = [Path(p).expanduser().resolve()
                                  for p in cfg.get("trusted_workdirs", [])]
+        if cfg.get("trust_workspace") is not None:
+            # Installs never overwrite an existing config, so this key can
+            # outlive the release that read it — say so rather than let
+            # gemini quietly stop trusting a workspace that used to work.
+            log(f"{name}: trust_workspace is obsolete and ignored; list the "
+                f"directories to trust in trusted_workdirs instead")
         self.timeout = cfg.get("timeout", 1800)
         self.state_file = STATE_DIR / f"{name}.json"
         self.sessions: dict[str, dict] = {}
         if self.state_file.exists():
             try:
-                self.sessions = json.loads(self.state_file.read_text())
-            except ValueError:
+                loaded = json.loads(self.state_file.read_text())
+                if not isinstance(loaded, dict):
+                    # Valid JSON of the wrong shape used to get past here and
+                    # kill the daemon on .items() below. That happens during
+                    # startup, so systemd restarted it straight back into the
+                    # same crash until the start limit gave up.
+                    raise ValueError(
+                        f"expected an object, got {type(loaded).__name__}")
+                self.sessions = loaded
+            except (ValueError, OSError) as err:
                 # The mesh survives state loss by design (create-collision
                 # retry); refusing to start on unreadable state would be
                 # strictly worse than starting empty.
                 bad = self.state_file.with_suffix(
                     f".corrupt-{int(time.time())}")
-                self.state_file.rename(bad)
-                log(f"state file was corrupt; moved to {bad}, starting empty")
+                try:
+                    self.state_file.rename(bad)
+                except OSError:
+                    pass
+                log(f"state file was unusable ({err}); moved to {bad}, "
+                    f"starting empty")
         migrated = False
         for ctx, val in list(self.sessions.items()):
             if isinstance(val, str):  # legacy schema: bare native session id
@@ -224,6 +242,13 @@ class CliAgentExecutor(AgentExecutor):
                     "session": val,
                     "workdir": str(Path(wd).expanduser().resolve()),
                 }
+                migrated = True
+            elif not (isinstance(val, dict) and "session" in val):
+                # Otherwise this context fails on every turn for ever, and
+                # only hand-editing the state file brings it back.
+                log(f"dropping malformed state entry for context {ctx!r}: "
+                    f"{str(val)[:60]}")
+                del self.sessions[ctx]
                 migrated = True
         if migrated:
             # Flush eagerly so the file on disk never misrepresents the
