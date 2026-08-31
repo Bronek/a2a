@@ -23,12 +23,12 @@ timeout kill a send mid-flight.
 ## Procedure
 
 1. **Preflight.** `list_agents` — every reviewer you plan to use must be
-   "up" (`systemctl --user start a2a-agent@<name>` if not). Check each
-   reviewer's `workdir` in `~/.config/a2a-agents/agents.toml` points at the
-   code under review.
+   "up" (`systemctl --user start a2a-agent@<name>` if not).
 2. **Dispatch in parallel.** One fresh context per reviewer, named
    `review-<topic>`; contexts are per-agent, so the same name on both is
-   fine. Brief template:
+   fine. The first message must pin the context's working directory to the
+   code under review — `send(..., workdir=...)` / `a2a-chat --workdir`; a
+   different directory later needs a new context name. Brief template:
 
    > Review the repository in your current working directory: README first,
    > then the code. Look for correctness bugs, security weaknesses, and

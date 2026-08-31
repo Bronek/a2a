@@ -14,10 +14,12 @@ same operations are available from the command line, for testing and for
 agents that have shell access but no MCP client:
 
   a2a-mcp list
-  a2a-mcp send <agent> <context> <message>
+  a2a-mcp send <agent> <context> <message> [workdir]
 
-Configuration (~/.config/a2a-agents/agents.toml) and the API key are shared
-with a2a-agentd / a2a-chat.
+The optional workdir is required on a context's first message: it pins the
+directory the agent runs in for that conversation's life. Configuration
+(~/.config/a2a-agents/agents.toml) and the API key are shared with
+a2a-agentd / a2a-chat.
 """
 import sys
 import tomllib
@@ -89,7 +91,8 @@ def do_list() -> str:
     return "\n".join(lines)
 
 
-def do_send(agent: str, context: str, message: str) -> tuple[str, bool]:
+def do_send(agent: str, context: str, message: str,
+            workdir: str | None = None) -> tuple[str, bool]:
     """Return (reply_text, failed)."""
     conf = load_conf()
     if agent not in conf:
@@ -99,17 +102,21 @@ def do_send(agent: str, context: str, message: str) -> tuple[str, bool]:
         return (f"ERROR: {KEY_FILE} not found or empty — "
                 f"start a daemon once to create it"), True
     cfg = conf[agent]
+    msg = {
+        "kind": "message",
+        "role": "user",
+        "messageId": str(uuid.uuid4()),
+        "contextId": context,
+        "parts": [{"kind": "text", "text": message}],
+    }
+    if workdir:
+        # A new context pins its working directory from this metadata.
+        msg["metadata"] = {"workdir": workdir}
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
         "method": "message/send",
-        "params": {"message": {
-            "kind": "message",
-            "role": "user",
-            "messageId": str(uuid.uuid4()),
-            "contextId": context,
-            "parts": [{"kind": "text", "text": message}],
-        }},
+        "params": {"message": msg},
     }
     try:
         with httpx.Client(
@@ -149,7 +156,8 @@ def serve() -> None:
         return do_list()
 
     @mcp.tool()
-    def send(agent: str, context: str, message: str) -> str:
+    def send(agent: str, context: str, message: str,
+             workdir: str | None = None) -> str:
         """Send a message to an agent on the local A2A mesh; blocks until the
         agent replies (can take minutes for real work). A failed turn
         raises a tool error instead of returning text.
@@ -157,8 +165,11 @@ def serve() -> None:
         agent: a name from list_agents (e.g. codex, kimi, gemini, claude).
         context: conversation id, any string; reuse it to continue that
         conversation, use a fresh one to start over.
-        message: the prompt to deliver."""
-        out, failed = do_send(agent, context, message)
+        message: the prompt to deliver.
+        workdir: REQUIRED for a new context — the directory the agent runs
+        in, pinned for the context's life. A different directory needs a
+        new context name."""
+        out, failed = do_send(agent, context, message, workdir)
         if failed:
             raise RuntimeError(out)
         return out
@@ -172,15 +183,16 @@ def main() -> None:
         serve()
     elif args[0] == "list" and len(args) == 1:
         print(do_list())
-    elif args[0] == "send" and len(args) == 4:
-        out, failed = do_send(args[1], args[2], args[3])
+    elif args[0] == "send" and len(args) in (4, 5):
+        out, failed = do_send(args[1], args[2], args[3],
+                              args[4] if len(args) == 5 else None)
         print(out)
         if failed:
             sys.exit(2)
     else:
         sys.exit("usage: a2a-mcp                      (MCP stdio server)\n"
                  "       a2a-mcp list\n"
-                 "       a2a-mcp send <agent> <context> <message>")
+                 "       a2a-mcp send <agent> <context> <message> [workdir]")
 
 
 if __name__ == "__main__":

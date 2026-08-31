@@ -52,7 +52,9 @@ shared API key.
 systemctl --user start a2a-agent@{claude,gemini,codex,kimi}
 a2a-chat --status
 a2a-chat kimi                                  # REPL: /context, /new, /exit
-a2a-chat codex --context review-42 --send "…"  # one-shot
+a2a-chat codex --context review-42 --workdir ~/gits/proj --send "…"
+                                               # one-shot; --workdir pins a
+                                               # new context to its project
 tail -f ~/.local/state/a2a-agents/claude.log   # progress of one agent
 ```
 
@@ -86,9 +88,10 @@ race.
 - Agents run in their CLIs' default permission modes, which is deliberately
   conservative; grant more through `extra_args` per agent, and only as much
   as the workload needs. The gemini worker additionally refuses untrusted
-  workspaces unless `trust_workspace = true` is set for it – enabling that
-  lets the workdir's own `.gemini/` configuration run as you, so set it
-  only for workdirs whose content you trust.
+  workspaces unless the context's pinned workdir sits inside one of its
+  `trusted_workdirs` (each entry trusts its whole subtree) – that passes
+  `--skip-trust`, letting the checkout's own `.gemini/` configuration run
+  as you, so list only trees whose content you trust.
 - Prompts are delivered to the CLIs via stdin, keeping them out of
   `/proc/<pid>/cmdline` – except for kimi, which has no stdin mode and
   keeps its prompt visible in argv for the duration of the turn.
@@ -108,7 +111,18 @@ pruned. The CLIs own their session stores and can lose them (gemini expires
 old sessions, kimi and claude scope theirs to a directory): when a resume
 fails for such a reason, the daemon starts a fresh native session under the
 same context and logs it — the conversation's history is gone, so re-state
-what matters rather than assuming the agent remembers. Subprocess output is buffered unbounded in memory, so a runaway CLI
+what matters rather than assuming the agent remembers.
+
+A context also pins its **working directory** on its first message, for
+life — several CLIs scope their session stores to the directory they run
+in, so moving a conversation would orphan its session. A new context
+refuses to start without one: pass it as message metadata
+`{"workdir": "/path"}` — via `a2a-chat --workdir`, the MCP `send` tool's
+`workdir` argument, or, in A2A Inspector, the **Message Metadata** field on
+the chat's first message. A different directory means a new context name.
+One daemon per agent thus serves conversations in any number of projects
+concurrently; entries created before this scheme adopt the per-agent
+`workdir` from the configuration, which is otherwise legacy. Subprocess output is buffered unbounded in memory, so a runaway CLI
 emitting gigabytes could OOM its daemon. And while status checks are
 anonymous by design, a `message/send` necessarily presents the key to
 whatever holds the port – if a daemon is down, a local squatter on its port

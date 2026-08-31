@@ -6,7 +6,11 @@
 #   kind          adapter: "claude" | "gemini" | "codex" | "kimi"
 #   command       CLI binary to run
 #   port          loopback port for the A2A daemon
-#   workdir       working directory for the CLI (default "~")
+#   workdir       LEGACY (migration only): state entries predating
+#                 per-context workdirs adopt it as their pin; new contexts
+#                 pin a workdir via message metadata on their first message
+#   trusted_workdirs  gemini only: directories (each trusting its whole
+#                 subtree) whose pinned contexts get --skip-trust
 #   timeout       seconds before a task is killed (default 1800)
 #   extra_args    appended to every invocation, e.g. permission/approval modes
 #   env_from_pass VAR = "pass entry" — resolved with pass(1) per task, only for
@@ -24,10 +28,10 @@ extra_args = []
 kind = "gemini"
 command = "gemini"
 port = 8003
-# Headless gemini refuses untrusted workspaces. Setting this passes
-# --skip-trust, which lets a checkout's own .gemini/ config run as you —
-# enable it only for workdirs whose content you trust.
-# trust_workspace = true
+# Headless gemini refuses untrusted workspaces. A context pinned inside one
+# of these directories gets --skip-trust, which lets that checkout's own
+# .gemini/ config run as you — list only trees whose content you trust.
+# trusted_workdirs = ["~/gits"]
 # extra_args = ["--approval-mode", "auto_edit"]
 extra_args = []
 
