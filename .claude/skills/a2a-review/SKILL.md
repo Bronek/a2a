@@ -13,7 +13,7 @@ review round using the mesh daemons as independent reviewers.
 
 Prefer the MCP tools if the `a2a` server is loaded: `list_agents()` and
 `send(agent, context, message)`. Otherwise the same operations exist as CLI:
-`a2a-mcp list` and `a2a-mcp send <agent> <context> <message>`.
+`a2a-mcp list` and `a2a-send -c <agent>/<context> <message>`.
 
 A `send` blocks until the agent finishes — often several minutes (codex at
 high reasoning effort can take 10+). From the Bash tool, run long sends in
@@ -27,7 +27,7 @@ timeout kill a send mid-flight.
 2. **Dispatch in parallel.** One fresh context per reviewer, named
    `review-<topic>`; contexts are per-agent, so the same name on both is
    fine. The first message must pin the context's working directory to the
-   code under review — `send(..., workdir=...)` / `a2a-chat --context <agent>/<ctx> --workdir`; a
+   code under review — `send(..., workdir=...)` / `a2a-send -c <agent>/<ctx> --workdir`; a
    different directory later needs a new context name. Brief template:
 
    > Review the repository in your current working directory: README first,

@@ -6,32 +6,49 @@
 #   "mcp>=2",
 # ]
 # ///
-"""MCP bridge to the local A2A agent mesh.
+"""The client for the local A2A agent mesh — one script, three names.
 
 Run with no arguments it is an MCP stdio server exposing the mesh as tools
-(register with e.g. `claude mcp add a2a -- a2a-mcp`, or via .mcp.json). The
-same operations are available from the command line, for testing and for
-agents that have shell access but no MCP client:
+(register with e.g. `claude mcp add a2a -- a2a-mcp`, or via .mcp.json).
+The same operations are a CLI, for humans and for agents that have shell
+access but no MCP client:
 
-  a2a-mcp list
-  a2a-mcp send <agent> <context> <message> [workdir]
-  a2a-mcp post <recipient> <message> [sender]
-  a2a-mcp mail <recipient>
-  a2a-mcp watch <recipient> [timeout-seconds]
+  a2a-send -c AGENT[/CONTEXT] "msg"     say it, print the reply
+                                        (exit 2 on a worker error)
+  a2a-post -c AGENT[/CONTEXT] "msg"     fire and forget: the worker runs
+                                        the turn, the reply is not awaited
+  a2a-mcp send|post -c ... "msg"        the same two, spelled as verbs;
+                                        --send / --post override either
+  a2a-mcp list                          which daemons are up (no key sent)
+  a2a-mcp post <recipient> <msg> [sender]   drop mail into a box
+  a2a-mcp mail <recipient>                  drain a box now
+  a2a-mcp watch <recipient> [timeout]       block until mail, then drain
 
-The optional workdir is required on a context's first message: it pins the
-directory the agent runs in for that conversation's life.
+The address is one token, `<agent>[/<context>]`, so the agent cannot
+drift away from the conversation it scopes; leave the context off for a
+fresh one (its generated name is printed, so the conversation can be
+continued). A NEW context pins its working directory on its first
+message: pass --workdir DIR, or --here for the current directory. Bare
+message words are joined with single spaces; quote (or use --) when the
+exact text matters or it starts with a dash. There is no REPL: to
+continue a conversation, send again with the same address.
 
-post/mail/watch are the asynchronous mailbox: `post` drops a message into
-a named box without blocking (findings delivered as they emerge), `mail`
-drains a box now, and `watch` blocks until mail arrives, then drains it —
-run it in the background as a doorbell for a live session. Boxes are plain
-0700 directories under ~/.local/state/a2a-agents/mailbox/; delivery is
-one-way and at-least-once, with no read receipts.
+NB `a2a-post` (an agent runs a turn; -c required) and `a2a-mcp post`
+(a file dropped into a mailbox; bare recipient) are different
+operations that share a word. Their shapes are disjoint, so each
+cross-use fails loudly.
+
+post/mail/watch are the asynchronous mailbox: `post` drops a message
+into a named box without blocking (findings delivered as they emerge),
+`mail` drains a box now, and `watch` blocks until mail arrives, then
+drains it — run it in the background as a doorbell for a live session.
+Boxes are plain 0700 directories under ~/.local/state/a2a-agents/mailbox;
+delivery is one-way and at-least-once, with no read receipts.
 
 Configuration (~/.config/a2a-agents/agents.toml) and the API key are
-shared with a2a-agentd / a2a-chat.
+shared with a2a-agentd.
 """
+import argparse
 import json
 import math
 import os
@@ -54,6 +71,14 @@ MAX_MESSAGE_BYTES = 256 * 1024
 MAX_BOX_MESSAGES = 2000
 STALE_TMP_SECONDS = 3600
 STALE_BAD_SECONDS = 7 * 24 * 3600
+# Long enough for a refusal the daemon makes before starting the CLI — an
+# unpinned workdir, a pin mismatch — to come back and be reported. A real
+# turn takes minutes and will not answer inside it.
+POST_GRACE_SECONDS = 6
+
+
+def die(msg: str) -> None:
+    sys.exit(f"{Path(sys.argv[0]).name or 'a2a-mcp'}: {msg}")
 
 
 def load_conf() -> dict:
@@ -64,9 +89,13 @@ def load_conf() -> dict:
 
 def read_key() -> str:
     try:
-        return KEY_FILE.read_text().strip()
+        key = KEY_FILE.read_text().strip()
     except FileNotFoundError:
-        return ""
+        key = ""
+    if not key:
+        raise RuntimeError(f"{KEY_FILE} not found or empty — "
+                           f"start a daemon once to create it")
+    return key
 
 
 def extract_text(result: dict) -> tuple[str, dict]:
@@ -90,7 +119,7 @@ def extract_text(result: dict) -> tuple[str, dict]:
                               if p.get("kind") == "text"]
                 break
         return "\n".join(chunks), meta
-    return str(result), {}
+    return json.dumps(result, indent=2), {}
 
 
 def do_list() -> str:
@@ -115,16 +144,21 @@ def do_list() -> str:
     return "\n".join(lines)
 
 
-def do_send(agent: str, context: str, message: str,
-            workdir: str | None = None) -> tuple[str, bool]:
-    """Return (reply_text, failed)."""
+def send_rpc(agent: str, context: str, message: str,
+             workdir: str | None = None,
+             read_timeout: float | None = None) -> tuple[str, dict]:
+    """The one protocol client. Returns (reply_text, metadata).
+
+    Raises RuntimeError for anything that prevented a reply; a
+    worker-side failure is a normal reply with metadata["error"], for
+    the surface to present its own way. httpx.ReadTimeout escapes
+    untranslated so grace-period callers can catch it.
+    """
     conf = load_conf()
     if agent not in conf:
-        return f"ERROR: unknown agent {agent!r} (one of: {', '.join(conf)})", True
+        raise RuntimeError(
+            f"unknown agent {agent!r} (one of: {', '.join(conf)})")
     key = read_key()
-    if not key:
-        return (f"ERROR: {KEY_FILE} not found or empty — "
-                f"start a daemon once to create it"), True
     cfg = conf[agent]
     msg = {
         "kind": "message",
@@ -144,32 +178,148 @@ def do_send(agent: str, context: str, message: str,
         "method": "message/send",
         "params": {"message": msg},
     }
+    # Read timeout tracks the daemon's own per-agent task timeout.
+    read = read_timeout if read_timeout is not None \
+        else cfg.get("timeout", 1800) + 120
     try:
         with httpx.Client(
                 base_url=f"http://127.0.0.1:{cfg['port']}",
                 headers={"X-API-Key": key},
-                timeout=httpx.Timeout(10, read=cfg.get("timeout", 1800) + 120),
+                timeout=httpx.Timeout(10, read=read),
         ) as c:
             r = c.post("/", json=payload)
             r.raise_for_status()
             data = r.json()
+    except httpx.ReadTimeout:
+        raise
     except httpx.HTTPError as err:
-        return f"ERROR: {agent} daemon unreachable or failed: {err}", True
+        raise RuntimeError(f"{agent} daemon unreachable or failed: {err}")
     except ValueError:
-        return (f"ERROR: {agent} port answered HTTP 200 with a non-JSON "
-                f"body — probably not an a2a-agentd"), True
+        raise RuntimeError(f"{agent} port answered HTTP 200 with a non-JSON "
+                           f"body — probably not an a2a-agentd")
     if "error" in data:
-        return (f"ERROR: A2A {data['error'].get('code')}: "
-                f"{data['error'].get('message')}"), True
+        raise RuntimeError(f"A2A {data['error'].get('code')}: "
+                           f"{data['error'].get('message')}")
     if "result" not in data:
-        return f"ERROR: {agent} returned malformed JSON-RPC (no result)", True
-    text, meta = extract_text(data["result"])
+        raise RuntimeError(f"{agent} returned malformed JSON-RPC (no result)")
+    return extract_text(data["result"])
+
+
+def do_send(agent: str, context: str, message: str,
+            workdir: str | None = None) -> tuple[str, bool]:
+    """The MCP-tool surface over send_rpc: (text, failed), never raises.
+    The reply carries an in-band routing tail, because its consumer is an
+    agent transcript with no stderr."""
+    try:
+        text, meta = send_rpc(agent, context, message, workdir)
+    except (RuntimeError, httpx.HTTPError) as err:
+        return f"ERROR: {err}", True
     native = meta.get("native_session_id")
     tail = f"\n\n[{agent} / context {context}" \
            + (f" / native session {native}]" if native else "]")
     if meta.get("error"):
         return f"ERROR (worker-side): {text}" + tail, True
     return text + tail, False
+
+
+def parse_address(text: str, conf: dict) -> tuple:
+    """Split `<agent>[/<context>]`, the address of one conversation.
+
+    The agent is always named here, so it cannot drift away from the
+    context it belongs to, and the pair survives being copied out of a log
+    or a note as one token. Omitting the context asks for a fresh one."""
+    agent, _, name = text.partition("/")
+    if agent not in conf:
+        die(f"unknown agent {agent!r} (one of: {', '.join(conf)}); "
+            f"--context is <agent>[/<context>]")
+    return agent, name or None
+
+
+def agent_cli(argv: list[str], default_post: bool) -> None:
+    """The human surface: a2a-send / a2a-post, and `a2a-mcp send|post`."""
+    ap = argparse.ArgumentParser(
+        prog=Path(sys.argv[0]).name, add_help=True,
+        description="send one message to a mesh agent's conversation")
+    # Several words are joined with single spaces, so a message need not be
+    # quoted; quote it (or use --) when the exact text matters or it starts
+    # with a dash.
+    ap.add_argument("message", nargs="*", help="the message to send")
+    # The agent lives inside the address rather than in an argument of its
+    # own: naming it is then unavoidable, and it cannot be separated from
+    # the context it scopes.
+    ap.add_argument("-c", "--context", metavar="AGENT[/CONTEXT]",
+                    help="which agent, and which conversation with it "
+                         "(a fresh one if the context is left out)")
+    where = ap.add_mutually_exclusive_group()
+    where.add_argument("--workdir", metavar="DIR",
+                       help="working directory to pin a NEW context to "
+                            "(required on a context's first message)")
+    where.add_argument("--here", action="store_true",
+                       help="pin it to the current directory")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--post", action="store_true",
+                      help="say the message and exit without waiting; the "
+                           "worker still runs the turn (default as a2a-post)")
+    mode.add_argument("--send", action="store_true",
+                      help="wait for the reply and print it "
+                           "(the default as a2a-send)")
+    args = ap.parse_args(argv)
+
+    posting = args.post or (default_post and not args.send)
+
+    conf = load_conf()
+    # Resolve where the caller is, not where the daemon is: the daemon
+    # would otherwise expand a relative path against its own cwd, which
+    # under systemd is ~ and never the project the caller meant.
+    if args.here:
+        args.workdir = str(Path.cwd())
+    elif args.workdir:
+        args.workdir = str(Path(args.workdir).expanduser().resolve())
+
+    if not args.context:
+        die(f"-c AGENT[/CONTEXT] is required, agent one of "
+            f"{', '.join(conf)} (for a MAILBOX drop, which needs no agent, "
+            f"use `a2a-mcp post <box> <msg>`)")
+    agent, ctx = parse_address(args.context, conf)
+
+    text_in = " ".join(args.message) if args.message else None
+    if not text_in:
+        die("nothing to send — give a message; to continue a conversation, "
+            "send again with the same -c address")
+
+    context_id = ctx or str(uuid.uuid4())
+    if posting:
+        try:
+            reply, meta = send_rpc(agent, context_id, text_in, args.workdir,
+                                   read_timeout=POST_GRACE_SECONDS)
+        except httpx.ReadTimeout:
+            # The expected path: the worker is busy doing the work. It runs
+            # the turn to completion and its session advances; only the
+            # reply is discarded.
+            print(f"queued to {agent} (context {context_id})",
+                  file=sys.stderr)
+            return
+        except (httpx.HTTPError, RuntimeError) as err:
+            die(f"{agent} daemon unreachable or failed: {err}")
+        # It answered inside the grace period: either a refusal, or a turn
+        # so short it finished already. Either way the caller should see it.
+        if meta.get("error"):
+            print(reply, file=sys.stderr)
+            sys.exit(2)
+        print(reply)
+        return
+    try:
+        text, meta = send_rpc(agent, context_id, text_in, args.workdir)
+    except (httpx.HTTPError, RuntimeError) as err:
+        die(f"{agent} daemon unreachable or failed: {err}")
+    native = meta.get("native_session_id")
+    if native:
+        print(f"(context {context_id} -> native session {native})",
+              file=sys.stderr)
+    if meta.get("error"):
+        print(text, file=sys.stderr)
+        sys.exit(2)
+    print(text)
 
 
 def _box(recipient: str) -> Path:
@@ -356,18 +506,38 @@ def serve() -> None:
     mcp.run()
 
 
+USAGE = """usage: a2a-mcp                        (MCP stdio server)
+       a2a-send -c AGENT[/CONTEXT] [--workdir DIR | --here] "msg"
+       a2a-post -c AGENT[/CONTEXT] [--workdir DIR | --here] "msg"
+       a2a-mcp send|post -c ...       (the same two, spelled as verbs)
+       a2a-mcp list
+       a2a-mcp post <recipient> <message> [sender]      (mailbox)
+       a2a-mcp mail <recipient>
+       a2a-mcp watch <recipient> [timeout-seconds]"""
+
+
 def main() -> None:
+    # a2a-send and a2a-post are this script under other names: the two
+    # agent-message personalities, wait and fire-and-forget. NB the name
+    # collision documented in the module docstring: `a2a-post` runs a turn
+    # (-c required); `a2a-mcp post` drops mail (bare recipient). The
+    # shapes are disjoint, so each cross-use fails loudly.
+    name = Path(sys.argv[0]).name
+    if name == "a2a-send":
+        return agent_cli(sys.argv[1:], default_post=False)
+    if name == "a2a-post":
+        return agent_cli(sys.argv[1:], default_post=True)
+
     args = sys.argv[1:]
     if not args:
         serve()
     elif args[0] == "list" and len(args) == 1:
         print(do_list())
-    elif args[0] == "send" and len(args) in (4, 5):
-        out, failed = do_send(args[1], args[2], args[3],
-                              args[4] if len(args) == 5 else None)
-        print(out)
-        if failed:
-            sys.exit(2)
+    elif args[0] == "send":
+        agent_cli(args[1:], default_post=False)
+    elif args[0] == "post" and len(args) >= 2 and args[1].startswith("-"):
+        # `post -c …` is the agent verb; `post <recipient> …` the mailbox.
+        agent_cli(args[1:], default_post=True)
     elif args[0] == "post" and len(args) in (3, 4):
         print(do_post(args[1], args[2], args[3] if len(args) == 4 else None))
     elif args[0] == "mail" and len(args) == 2:
@@ -376,12 +546,7 @@ def main() -> None:
         do_check(args[1], wait=True, deliver=deliver_stdout,
                  timeout=float(args[2]) if len(args) == 3 else None)
     else:
-        sys.exit("usage: a2a-mcp                      (MCP stdio server)\n"
-                 "       a2a-mcp list\n"
-                 "       a2a-mcp send <agent> <context> <message> [workdir]\n"
-                 "       a2a-mcp post <recipient> <message> [sender]\n"
-                 "       a2a-mcp mail <recipient>\n"
-                 "       a2a-mcp watch <recipient> [timeout-seconds]")
+        sys.exit(USAGE)
 
 
 if __name__ == "__main__":
@@ -395,16 +560,17 @@ if __name__ == "__main__":
         # reply was already received, so the turn completed and only the
         # local display was truncated.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        name = Path(sys.argv[0]).name
         verb = sys.argv[1] if len(sys.argv) > 1 else ""
         if verb in ("mail", "watch"):
             sys.exit("a2a-mcp: output cut off by the consumer — "
                      "mail left in the box")
-        if verb == "send":
-            sys.exit("a2a-mcp: output cut off by the consumer — the turn "
-                     "completed server-side; only the displayed reply was "
-                     "truncated")
-        sys.exit("a2a-mcp: output cut off by the consumer")
+        if name in ("a2a-send", "a2a-post") or verb in ("send", "post"):
+            sys.exit(f"{name}: output cut off by the consumer — the turn "
+                     f"completed server-side; only the displayed reply was "
+                     f"truncated")
+        sys.exit(f"{name}: output cut off by the consumer")
     except ValueError as err:
         # Bad recipient names and a NaN timeout are usage errors; they
         # deserve the usage treatment, not a traceback.
-        sys.exit(f"a2a-mcp: {err}")
+        sys.exit(f"{Path(sys.argv[0]).name}: {err}")

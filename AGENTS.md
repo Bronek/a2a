@@ -4,7 +4,8 @@ This machine runs agent CLIs from several labs (claude, gemini, codex, kimi)
 wrapped as A2A daemons on loopback ports. You can converse with any of them
 through the `a2a` MCP server — tools `list_agents` and `send` — or, given
 shell access, the same operations as a CLI: `a2a-mcp list` and
-`a2a-mcp send <agent> <context> <message> [workdir]`.
+`a2a-send -c <agent>[/<context>] [--workdir DIR] <message>` (`a2a-mcp
+send …` is the same command under its universal name).
 
 Rules that matter:
 

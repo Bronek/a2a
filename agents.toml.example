@@ -1,4 +1,4 @@
-# Agent definitions for a2a-agentd / a2a-chat.
+# Agent definitions for a2a-agentd / a2a-mcp.
 # Copied to ~/.config/a2a-agents/agents.toml by `make install` when that file
 # does not exist yet; edit the copy, not this example.
 #

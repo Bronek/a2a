@@ -387,7 +387,7 @@ class CliAgentExecutor(AgentExecutor):
             raise RuntimeError(
                 f"context {ctx_id!r} has no pinned workdir; set one on its "
                 'first message — metadata {"workdir": "/path"} via '
-                "a2a-chat --workdir, a2a-mcp send(..., workdir=...), or "
+                "a2a-send --workdir (or --here), a2a-mcp send(..., workdir=...), or "
                 "A2A Inspector's Message Metadata field")
         if not Path(req).is_dir():
             raise RuntimeError(f"workdir {req} is not an existing directory")

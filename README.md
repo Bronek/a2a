@@ -14,34 +14,34 @@ supported; each runs as its own daemon, launched and observed separately.
   virtualenv to manage) serving the A2A protocol – JSON-RPC `message/send` –
   on `127.0.0.1:<port>`, with the real work delegated to the CLI in
   non-interactive mode.
-- `a2a-chat --context <agent>/<context> "msg"` – one-shot client: says the
-  message, prints the reply. Continuing a conversation is another one-shot
-  with the same address; there is deliberately no REPL to hold state of its
-  own. `--status` shows which daemons are up, and `--workdir` pins a new
-  conversation to its project.
+- `a2a-mcp` – the client: one script, three names. Run with no arguments
+  it is a stdio MCP server exposing the mesh as `list_agents` and `send`
+  tools, so any MCP-capable agent CLI can drive the mesh through its
+  native tool calling – its own permission model, no shell escape, no
+  sandbox loosening. The same operations double as a CLI – `a2a-mcp list`,
+  `a2a-mcp send`, and the mailbox verbs below – for humans and for agents
+  that have shell access but no MCP client. Registering the bridge, and
+  the approval settings a headless worker needs before it may call these
+  tools, are covered in
+  [Permissions and configuration](#permissions-and-configuration).
+- `a2a-send -c <agent>[/<context>] "msg"` – the same script under its
+  one-shot name: says the message, prints the reply. Continuing a
+  conversation is another one-shot with the same address; there is
+  deliberately no REPL to hold state of its own. `--workdir` (or `--here`)
+  pins a new conversation to its project.
   The address is one token, and the agent is inside it: the agents are
   peers, so an agent that could be defaulted, or left in a separate
   argument, is an agent that can drift away from the conversation it
   scopes. Written this way the pair survives being copied out of a log or a
   note, instead of the agent being resupplied from memory at the far end.
-  Leave the context off – `--context kimi` – to start a fresh one.
-- `a2a-post --context <agent>/<context> "msg"` – the same client under
-  another name (a symlink),
+  Leave the context off – `-c kimi` – to start a fresh one.
+- `a2a-post -c <agent>[/<context>] "msg"` – the third name,
   which does not wait for the reply. The worker still runs the whole turn
   and its session advances; only the answer is discarded, to be collected
   later from the mailbox or on the next message. It waits a few seconds
   first, so a refusal the daemon makes before starting work – an unpinned
   workdir, a mismatched pin – is still reported rather than lost. `--post`
-  and `--chat` select the behaviour explicitly.
-- `a2a-mcp` – MCP bridge. Run with no arguments it is a stdio MCP server
-  exposing the mesh as `list_agents` and `send` tools, so any MCP-capable
-  agent CLI can drive the mesh through its native tool calling – its own
-  permission model, no shell escape, no sandbox loosening. The same
-  operations double as a CLI: `a2a-mcp list` and
-  `a2a-mcp send <agent> <context> <message> [workdir]`. Registering the
-  bridge, and the approval settings a headless worker needs before it may
-  call these tools, are covered in
-  [Permissions and configuration](#permissions-and-configuration).
+  and `--send` select the behaviour explicitly, under any name.
 - The **mailbox** – `post` and `check_mail` tools (CLI: `post`, `mail`,
   `watch`) – gives the mesh an asynchronous edge: a worker deep in a long
   task posts findings to a named box as they emerge, instead of saving
@@ -159,12 +159,12 @@ rather than ignoring it silently.
 
 ```
 systemctl --user start a2a-agent@{claude,gemini,codex,kimi}
-a2a-chat --status
-a2a-chat --context codex/review-42 --workdir ~/gits/proj "…"
+a2a-mcp list
+a2a-send -c codex/review-42 --workdir ~/gits/proj "…"
                                                # one-shot; --workdir pins a
                                                # new context to its project
-a2a-chat --context gemini/audit --here "…"     # …or --here for this one
-a2a-post --context kimi/slice-a --workdir ~/gits/proj "start the analysis"
+a2a-send -c gemini/audit --here "…"            # …or --here for this one
+a2a-post -c kimi/slice-a --workdir ~/gits/proj "start the analysis"
                                                # fire and forget: the turn
                                                # runs, the reply is not awaited
 tail -f ~/.local/state/a2a-agents/claude.log   # progress of one agent
@@ -186,7 +186,7 @@ A context also pins its **working directory**, on its first message and for
 life. Several CLIs scope their session stores to the directory they run in,
 so moving a conversation would orphan its session. A new context therefore
 refuses to start without one: pass it as message metadata
-`{"workdir": "/path"}` – via `a2a-chat --workdir`, `--here` for the current
+`{"workdir": "/path"}` – via `a2a-send --workdir`, `--here` for the current
 directory,
 the MCP `send` tool's `workdir` argument, or, in A2A Inspector, the
 **Message Metadata** field on the chat's first message. Paths are resolved by the client, where you are,
@@ -240,9 +240,10 @@ daemon ran them.
   the same Unix user, so any worker can drain any box, the human's included,
   and draining is destructive. Box names route mail; they do not protect it.
 - **Error signalling.** A worker-side failure comes back as a normal A2A
-  message flagged with `metadata.error`; a one-shot `a2a-chat` exits 2 and
-  `a2a-mcp send` prefixes the reply with `ERROR`, so scripts and agents can
-  tell failures from content.
+  message flagged with `metadata.error`; a one-shot `a2a-send` (under any
+  of its names) exits 2 with the message on stderr, and the MCP `send` tool
+  raises a tool error, so scripts and agents can tell failures from
+  content.
 
 ## Limitations
 
