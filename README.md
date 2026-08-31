@@ -71,8 +71,9 @@ have run.
 
 Each grant is narrower or wider than it looks, and the differences matter:
 
-- **claude** allowlists exactly the mesh server's tools and changes nothing
-  else – the narrowest of the four.
+- **claude** names the mesh tools so they are pre-approved. Read this as a
+  grant, not a fence: it does not restrict the worker's other capabilities,
+  which are broader than they appear – see the table below.
 - **gemini** needs the trust flag because headless `gemini` cannot answer an
   approval prompt. You can set it globally or per project. The global form
   is one edit but auto-approves the mesh tools in every directory gemini
@@ -90,6 +91,35 @@ Each grant is narrower or wider than it looks, and the differences matter:
 - **kimi** cannot answer prompts headless either, hence the allow rule; its
   registration lives at user level so it loads without the workspace-trust
   prompt a project-level `.kimi-code/mcp.json` would raise.
+
+### What a headless worker can actually do
+
+Settle this by measurement, not by reading the flags: each CLI decides for
+itself what "there is nobody to ask" means, and the four answers are
+genuinely different. Every row below was probed. Each worker was asked to
+attempt a file read, a shell command, a file write and an MCP call, and to
+report each as succeeded or blocked; the results were then checked from
+outside, because a worker's account of its own powers is not evidence.
+
+| Agent | File read | Shell execution | File write | Mesh tools | Effective scope |
+|---|---|---|---|---|---|
+| **claude** | yes | yes | yes | yes | Unrestricted, including outside the pinned workdir |
+| **kimi** | yes | yes | yes | yes | Unrestricted, and wider than the same CLI run interactively |
+| **codex** | yes | auto-reviewed | auto-reviewed | yes | Approvals go to an automatic reviewer, in a workspace-write sandbox |
+| **gemini** | yes | – | – | yes | No shell or write tool exists; read and mesh tools only |
+
+Two of the four can therefore change anything you can, and `--allowedTools`
+does not alter that: it marks tools as pre-approved, it does not fence off
+the rest. Codex is the only one whose writes are both reviewed and confined
+to the workspace. Gemini is the only one that structurally cannot modify
+the tree it is reading – which makes the weakest coder of the four the
+safest reviewer, and is worth remembering when choosing who to point at a
+repository.
+
+One trap when probing this yourself: in the claude worker the mesh tools
+are *deferred*, so calling one cold fails with `InputValidationError`
+rather than a permission error. That reads exactly like a blocked tool but
+is not one – the tool needs loading first.
 
 The `a2a-review` project skill teaches the review choreography on top of
 all this.
@@ -169,16 +199,19 @@ daemon ran them.
   – so a checkout you would not trust with a credential should not be given
   a worker that holds one. This requires the gpg-agent passphrase cache to
   be primed (any `pass show` in an interactive shell does it).
-- **Permission modes.** Agents run in their CLIs' default permission modes,
-  which is deliberately conservative; grant more through `extra_args` per
-  agent, and only as much as the workload needs. The gemini worker
-  additionally refuses untrusted workspaces unless the context's pinned
-  workdir sits inside one of its `trusted_workdirs` (each entry trusts its
-  whole subtree). Both sides of that test are resolved before comparison, so
-  neither `..` nor a symlink can land a worker outside the tree it was
-  cleared for. A trusted directory passes `--skip-trust`, which lets that
-  checkout's own `.gemini/` configuration run as you – so list only trees
-  whose content you trust.
+- **Permission modes.** Agents inherit their CLI's default headless
+  behaviour, and that behaviour is not uniformly conservative: two of the
+  four will run any command you can. See
+  [what a headless worker can actually do](#what-a-headless-worker-can-actually-do)
+  before deciding which agent may visit which repository; narrow an
+  over-powered one through its own `extra_args` or config.
+- **Gemini's workspace gate.** The gemini worker refuses a workspace
+  outright unless the context's pinned workdir sits inside one of its
+  `trusted_workdirs` (each entry trusting its whole subtree). Both sides of
+  that test are resolved before comparison, so neither `..` nor a symlink
+  can land a worker outside the tree it was cleared for. A trusted directory
+  passes `--skip-trust`, which lets that checkout's own `.gemini/`
+  configuration run as you – so list only trees whose content you trust.
 - **Process visibility.** Prompts are delivered to the CLIs via stdin,
   keeping them out of `/proc/<pid>/cmdline` – except for kimi, which has no
   stdin mode and keeps its prompt visible in argv for the duration of the
