@@ -261,11 +261,16 @@ class CliAgentExecutor(AgentExecutor):
                     f".corrupt-{int(time.time())}")
                 try:
                     self.state_file.rename(bad)
-                except OSError:
-                    pass
-                log(f"state file was unusable ({err}); moved to {bad}, "
-                    f"starting empty")
-        migrated = False
+                    log(f"state file was unusable ({err}); moved to {bad}, "
+                        f"starting empty")
+                except OSError as mv_err:
+                    # Do not claim a rename that failed: the next save_state
+                    # will overwrite the original, so this log line is the
+                    # last trace the corrupt content ever existed.
+                    log(f"state file was unusable ({err}) and could not be "
+                        f"moved aside ({mv_err}); starting empty — the next "
+                        f"save will overwrite it")
+        migrated, dropped = False, {}
         for ctx, val in list(self.sessions.items()):
             if isinstance(val, str):  # legacy schema: bare native session id
                 # Before per-context pinning every context ran in
@@ -280,13 +285,29 @@ class CliAgentExecutor(AgentExecutor):
                     "workdir": str(Path(wd).expanduser().resolve()),
                 }
                 migrated = True
-            elif not (isinstance(val, dict) and "session" in val):
-                # Otherwise this context fails on every turn for ever, and
-                # only hand-editing the state file brings it back.
-                log(f"dropping malformed state entry for context {ctx!r}: "
-                    f"{str(val)[:60]}")
+            elif not (isinstance(val, dict) and "session" in val
+                      and isinstance(val.get("session"), str | None)
+                      and isinstance(val.get("workdir"), str | None)):
+                # A wedge-shaped value — no dict, no "session" key, or
+                # fields of the wrong type ({"session": 42} would raise in
+                # _pin_workdir or exec argv on every turn, for ever, and
+                # only hand-editing the file brings the context back.
+                dropped[ctx] = val
                 del self.sessions[ctx]
                 migrated = True
+        if dropped:
+            # Set the values aside rather than deleting them: the flush
+            # below makes the drop durable at once, and a typo'd key may
+            # name a perfectly recoverable session. The unreadable-file
+            # path above keeps its evidence; this path should too.
+            aside = self.state_file.with_suffix(
+                f".dropped-{int(time.time())}")
+            fd = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(dropped, indent=1, default=str))
+            log(f"dropped {len(dropped)} malformed state "
+                f"entr{'y' if len(dropped) == 1 else 'ies'} "
+                f"({', '.join(map(repr, dropped))}); values kept in {aside}")
         if migrated:
             # Flush eagerly so the file on disk never misrepresents the
             # schema the daemon is actually running with.
