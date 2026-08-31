@@ -9,6 +9,9 @@ Usage:
   a2a-chat --context AGENT[/CONTEXT]           interactive REPL
   a2a-chat --context AGENT/CONTEXT "msg"       one-shot, prints the reply
                                                (exit 2 on a worker error)
+  a2a-chat --context AGENT/CONTEXT -- words …  bare words are joined with
+                                               single spaces; quote instead
+                                               when the exact text matters
   a2a-post --context AGENT/CONTEXT "msg"       fire and forget: the worker
                                                runs the turn, the reply is
                                                not waited for
@@ -264,7 +267,10 @@ def parse_address(text: str, conf: dict) -> tuple:
 
 def main() -> None:
     ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("message", nargs="?",
+    # Several words are joined with single spaces, so a message need not be
+    # quoted; quote it (or use --) when the exact text matters or it starts
+    # with a dash.
+    ap.add_argument("message", nargs="*",
                     help="one-shot message; without one, a2a-chat opens a REPL")
     # The agent lives inside the address rather than in an argument of its
     # own: naming it is then unavoidable, and it cannot be separated from
@@ -312,7 +318,7 @@ def main() -> None:
     agent, ctx = parse_address(args.context, conf)
     args.agent = agent
 
-    text_in = args.message
+    text_in = " ".join(args.message) if args.message else None
     if posting and not text_in:
         die('posting needs a message: '
             'a2a-post --context AGENT/CONTEXT "msg"')
