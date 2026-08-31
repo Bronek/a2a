@@ -14,8 +14,10 @@ Usage:
                                                not waited for
   a2a-chat --status                            which daemons are up (no key)
   a2a-chat --context AGENT/CONTEXT --workdir DIR "msg"
+  a2a-chat --context AGENT/CONTEXT --here "msg"
                                                pin a NEW context's directory
-                                               (required on its first message)
+                                               (required on its first message);
+                                               --here means the current one
 
 The address is <agent>/<context>: one token, so the agent cannot drift away
 from the conversation it scopes. Leave the context off for a fresh one.
@@ -192,7 +194,7 @@ def repl(client: httpx.Client, agent: str, context_id: str,
         if line.startswith("/workdir"):
             arg = line.removeprefix("/workdir").strip()
             if arg:
-                workdir = str(Path(arg).expanduser())
+                workdir = str(Path(arg).expanduser().resolve())
             print(f"workdir: {workdir or '(unset)'}")
             continue
         if line.startswith("/context"):
@@ -254,8 +256,12 @@ def main() -> None:
     ap.add_argument("--context", metavar="AGENT[/CONTEXT]",
                     help="which agent, and which conversation with it "
                          "(a fresh one if the context is left out)")
-    ap.add_argument("--workdir", help="working directory to pin a NEW "
-                    "context to (required on a context's first message)")
+    where = ap.add_mutually_exclusive_group()
+    where.add_argument("--workdir", metavar="DIR",
+                       help="working directory to pin a NEW context to "
+                            "(required on a context's first message)")
+    where.add_argument("--here", action="store_true",
+                       help="pin it to the current directory")
     ap.add_argument("--status", action="store_true",
                     help="show daemon status for all configured agents")
     mode = ap.add_mutually_exclusive_group()
@@ -276,6 +282,14 @@ def main() -> None:
     if args.status:
         show_status(conf)
         return
+    # Resolve where the caller is, not where the daemon is: the daemon
+    # would otherwise expand a relative path against its own cwd, which
+    # under systemd is ~ and never the project the caller meant.
+    if args.here:
+        args.workdir = str(Path.cwd())
+    elif args.workdir:
+        args.workdir = str(Path(args.workdir).expanduser().resolve())
+
     if not args.context:
         die(f"--context AGENT[/CONTEXT] is required, agent one of "
             f"{', '.join(conf)} (only --status works without it)")

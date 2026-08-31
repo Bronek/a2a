@@ -134,7 +134,9 @@ def do_send(agent: str, context: str, message: str,
     }
     if workdir:
         # A new context pins its working directory from this metadata.
-        msg["metadata"] = {"workdir": workdir}
+        # Resolved here, where the caller is: the daemon would expand a
+        # relative path against its own cwd instead.
+        msg["metadata"] = {"workdir": str(Path(workdir).expanduser().resolve())}
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),

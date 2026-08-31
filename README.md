@@ -163,6 +163,7 @@ a2a-chat --context kimi                        # REPL on a fresh context
 a2a-chat --context codex/review-42 --workdir ~/gits/proj "…"
                                                # one-shot; --workdir pins a
                                                # new context to its project
+a2a-chat --context gemini/audit --here "…"     # …or --here for this one
 a2a-post --context kimi/slice-a --workdir ~/gits/proj "start the analysis"
                                                # fire and forget: the turn
                                                # runs, the reply is not awaited
@@ -185,11 +186,13 @@ A context also pins its **working directory**, on its first message and for
 life. Several CLIs scope their session stores to the directory they run in,
 so moving a conversation would orphan its session. A new context therefore
 refuses to start without one: pass it as message metadata
-`{"workdir": "/path"}` – via `a2a-chat --workdir` or the REPL's `/workdir`,
+`{"workdir": "/path"}` – via `a2a-chat --workdir`, `--here` for the current
+directory, or the REPL's `/workdir`,
 the MCP `send` tool's `workdir` argument, or, in A2A Inspector, the
-**Message Metadata** field on the chat's first message. Paths are resolved
-when pinned, so a relative path or a symlink means the same directory later
-that it meant at the time. A different directory means a new context name.
+**Message Metadata** field on the chat's first message. Paths are resolved by the client, where you are,
+rather than by the daemon, whose own directory is `~` and never the project
+you meant; a relative path or a symlink therefore means the same directory
+later that it meant at the time. A different directory means a new context name.
 
 One daemon per agent thus serves conversations in any number of projects
 concurrently. Entries created before this scheme adopt the per-agent
