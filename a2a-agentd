@@ -190,8 +190,11 @@ class CliAgentExecutor(AgentExecutor):
         # entries that predate per-context workdirs. New contexts must pin
         # theirs via message metadata on their first message.
         self.legacy_workdir = cfg.get("workdir")
-        # gemini only: each entry trusts that directory and its whole subtree
-        self.trusted_workdirs = [Path(p).expanduser()
+        # gemini only: each entry trusts that directory and its whole subtree.
+        # Resolved, because the subtree test below is lexical: an unresolved
+        # entry would both admit paths outside the tree and miss legitimate
+        # ones reached through a symlink.
+        self.trusted_workdirs = [Path(p).expanduser().resolve()
                                  for p in cfg.get("trusted_workdirs", [])]
         self.timeout = cfg.get("timeout", 1800)
         self.state_file = STATE_DIR / f"{name}.json"
@@ -260,9 +263,15 @@ class CliAgentExecutor(AgentExecutor):
         if requested is not None and not (isinstance(requested, str)
                                           and requested.strip()):
             raise RuntimeError("workdir metadata must be a non-empty string")
-        req = str(Path(requested).expanduser()) if requested else None
+        # Resolved: the pin is compared lexically (here and against
+        # trusted_workdirs), so ".." components, symlinks and relative paths
+        # must be flattened before they mean anything. Resolving also makes
+        # the pin stable — a relative "." would otherwise be stored verbatim
+        # and re-interpreted against the daemon's cwd on every later turn.
+        req = str(Path(requested).expanduser().resolve()) if requested else None
         pinned = entry.get("workdir") if entry else None
         if pinned:
+            pinned = str(Path(pinned).expanduser().resolve())
             if req and req != pinned:
                 raise RuntimeError(
                     f"context {ctx_id!r} is pinned to workdir {pinned}; for "
@@ -282,8 +291,8 @@ class CliAgentExecutor(AgentExecutor):
                        req_workdir) -> tuple[str, str]:
         entry = self.sessions.get(ctx_id)
         workdir = self._pin_workdir(ctx_id, entry, req_workdir)
-        trusted = any(Path(workdir) == t or Path(workdir).is_relative_to(t)
-                      for t in self.trusted_workdirs)
+        wd = Path(workdir).resolve()
+        trusted = any(wd.is_relative_to(t) for t in self.trusted_workdirs)
         native = entry["session"] if entry else None
         resume = native is not None
         if not resume and not self.adapter.chooses_own_id():
