@@ -40,19 +40,21 @@ supported; each runs as its own daemon, launched and observed separately.
   and its session advances; only the answer is discarded, to be collected
   later from the mailbox or on the next message. It waits a few seconds
   first, so a refusal the daemon makes before starting work – an unpinned
-  workdir, a mismatched pin – is still reported rather than lost. `--post`
-  and `--send` select the behaviour explicitly, under any name.
+  workdir, a mismatched pin – is still reported rather than lost. A turn
+  that fails after the grace period fails silently; use `a2a-send` when
+  the verdict matters. `--post` and `--send` select the behaviour
+  explicitly, under any name.
 - The **mailbox** – `spool` and `check_mail` tools (CLI: `spool`, `mail`,
   `watch`) – gives the mesh an asynchronous edge: a worker deep in a long
-  task posts findings to a named box as they emerge, instead of saving
+  task spools findings to a named box as they emerge, instead of saving
   everything for one final reply. A live session runs `a2a-mcp watch lead`
   in the background as a doorbell that wakes it when mail lands.
   Conventionally `lead` is the orchestrating session and `bronek` reaches
   the human. Boxes are 0700 directories under
   `~/.local/state/a2a-agents/mailbox/`; delivery is one-way with no read
   receipts – reports, not handshakes – and mail is untrusted content from
-  other agents, to be read as data. A post is capped at 256 KiB, a box at
-  2000 undrained messages. Workers self-identify their posts through
+  other agents, to be read as data. One message is capped at 256 KiB, a
+  box at 2000 undrained messages. Workers self-identify their mail through
   `A2A_AGENT` and `A2A_CONTEXT`, which the daemon exports to every CLI
   subprocess.
 - `a2a-agent@.service` – systemd user template unit; one instance per agent
@@ -102,7 +104,7 @@ Each grant is narrower or wider than it looks, and the differences matter:
   codex's automatic reviewer instead, at the price of a workspace-write
   sandbox, and `--disable apps` strips the built-in ChatGPT-apps suite from
   a worker that has no use for it. Codex also sanitises the environment it
-  hands MCP servers, so its mailbox posts should pass `sender` explicitly.
+  hands MCP servers, so its spooled mail should pass `sender` explicitly.
 - **kimi** cannot answer prompts headless either, hence the allow rule; its
   registration lives at user level so it loads without the workspace-trust
   prompt a project-level `.kimi-code/mcp.json` would raise.

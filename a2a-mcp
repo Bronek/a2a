@@ -29,8 +29,10 @@ drift away from the conversation it scopes; leave the context off for a
 fresh one (its generated name is printed, so the conversation can be
 continued). A NEW context pins its working directory on its first
 message: pass --workdir DIR, or --here for the current directory. Bare
-message words are joined with single spaces; quote (or use --) when the
-exact text matters or it starts with a dash. There is no REPL: to
+message words are joined with single spaces; quote the message when its
+exact spacing matters, and put -- before one that starts with a dash
+(quoting alone does not stop argparse reading it as an option). There
+is no REPL: to
 continue a conversation, send again with the same address.
 
 spool/mail/watch are the asynchronous mailbox: `spool` drops a message
@@ -207,8 +209,11 @@ def do_send(agent: str, context: str, message: str,
     agent transcript with no stderr."""
     try:
         text, meta = send_rpc(agent, context, message, workdir)
-    except (RuntimeError, httpx.HTTPError) as err:
+    except RuntimeError as err:
         return f"ERROR: {err}", True
+    except httpx.HTTPError as err:
+        return (f"ERROR: {agent} did not answer: "
+                f"{err or type(err).__name__}"), True
     native = meta.get("native_session_id")
     tail = f"\n\n[{agent} / context {context}" \
            + (f" / native session {native}]" if native else "]")
@@ -226,18 +231,20 @@ def parse_address(text: str, conf: dict) -> tuple:
     agent, _, name = text.partition("/")
     if agent not in conf:
         die(f"unknown agent {agent!r} (one of: {', '.join(conf)}); "
-            f"--context is <agent>[/<context>]")
+            f"-c takes <agent>[/<context>]")
     return agent, name or None
 
 
-def agent_cli(argv: list[str], default_post: bool) -> None:
+def agent_cli(argv: list[str], default_post: bool,
+              prog: str | None = None) -> None:
     """The human surface: a2a-send / a2a-post, and `a2a-mcp send|post`."""
     ap = argparse.ArgumentParser(
-        prog=Path(sys.argv[0]).name, add_help=True,
+        prog=prog or Path(sys.argv[0]).name, add_help=True,
         description="send one message to a mesh agent's conversation")
     # Several words are joined with single spaces, so a message need not be
-    # quoted; quote it (or use --) when the exact text matters or it starts
-    # with a dash.
+    # quoted; quote it when its exact spacing matters, and use -- when it
+    # starts with a dash — quoting alone does not stop argparse reading it
+    # as an option.
     ap.add_argument("message", nargs="*", help="the message to send")
     # The agent lives inside the address rather than in an argument of its
     # own: naming it is then unavoidable, and it cannot be separated from
@@ -285,8 +292,8 @@ def agent_cli(argv: list[str], default_post: bool) -> None:
     context_id = ctx or str(uuid.uuid4())
     if posting:
         try:
-            reply, meta = send_rpc(agent, context_id, text_in, args.workdir,
-                                   read_timeout=POST_GRACE_SECONDS)
+            text, meta = send_rpc(agent, context_id, text_in, args.workdir,
+                                  read_timeout=POST_GRACE_SECONDS)
         except httpx.ReadTimeout:
             # The expected path: the worker is busy doing the work. It runs
             # the turn to completion and its session advances; only the
@@ -294,19 +301,26 @@ def agent_cli(argv: list[str], default_post: bool) -> None:
             print(f"queued to {agent} (context {context_id})",
                   file=sys.stderr)
             return
-        except (httpx.HTTPError, RuntimeError) as err:
-            die(f"{agent} daemon unreachable or failed: {err}")
+        except RuntimeError as err:
+            # send_rpc's message already names the agent and the cause;
+            # a "daemon unreachable" prefix here would mislabel local
+            # problems like a missing key file.
+            die(str(err))
+        except httpx.HTTPError as err:
+            die(f"{agent} daemon did not answer: "
+                f"{err or type(err).__name__}")
         # It answered inside the grace period: either a refusal, or a turn
         # so short it finished already. Either way the caller should see it.
-        if meta.get("error"):
-            print(reply, file=sys.stderr)
-            sys.exit(2)
-        print(reply)
-        return
-    try:
-        text, meta = send_rpc(agent, context_id, text_in, args.workdir)
-    except (httpx.HTTPError, RuntimeError) as err:
-        die(f"{agent} daemon unreachable or failed: {err}")
+    else:
+        try:
+            text, meta = send_rpc(agent, context_id, text_in, args.workdir)
+        except RuntimeError as err:
+            die(str(err))
+        except httpx.HTTPError as err:
+            die(f"{agent} daemon did not answer: "
+                f"{err or type(err).__name__}")
+    # One tail for both modes, so a generated context id and the native
+    # session are never lost to the mode that happened to answer quickly.
     native = meta.get("native_session_id")
     if native:
         print(f"(context {context_id} -> native session {native})",
@@ -324,7 +338,7 @@ def _box(recipient: str) -> Path:
     # daemon's session map on its way past.
     if not re.fullmatch(r"(?=.*[A-Za-z0-9])[A-Za-z0-9._-]{1,64}", recipient):
         raise ValueError(f"invalid recipient name {recipient!r}")
-    # Explicit modes: posters may run under a permissive umask.
+    # Explicit modes: writers may run under a permissive umask.
     for d in (MAILBOX_DIR, MAILBOX_DIR / recipient):
         d.mkdir(parents=True, exist_ok=True, mode=0o700)
     return MAILBOX_DIR / recipient
@@ -344,9 +358,9 @@ def do_spool(recipient: str, message: str, sender: str | None = None) -> str:
     if size > MAX_MESSAGE_BYTES:
         raise ValueError(
             f"message is {size} bytes, over the {MAX_MESSAGE_BYTES}-byte "
-            f"limit for one post — post a summary and leave the bulk in a "
+            f"limit for one message — spool a summary and leave the bulk in a "
             f"file the reader can open")
-    # Reap what interrupted posts and quarantined entries left behind.
+    # Reap what interrupted writes and quarantined entries left behind.
     # Drains skip dotfiles, so nothing else ever removes either kind; the
     # quarantine gets a week in case someone wants to look at it.
     for pattern, ttl in ((".*.tmp", STALE_TMP_SECONDS),
@@ -362,10 +376,10 @@ def do_spool(recipient: str, message: str, sender: str | None = None) -> str:
     if held >= MAX_BOX_MESSAGES:
         raise ValueError(
             f"mailbox {recipient!r} already holds {held} undrained messages; "
-            f"drain it before posting more")
+            f"drain it before spooling more")
     if not sender:
-        # Inside a mesh worker the daemon exports these, so posts
-        # self-identify down to the conversation they came from. Some CLIs
+        # Inside a mesh worker the daemon exports these, so spooled mail
+        # self-identifies down to the conversation it came from. Some CLIs
         # (codex) sanitise the env they hand to MCP servers, losing them —
         # such agents should pass `sender` explicitly instead.
         agent = os.environ.get("A2A_AGENT")
@@ -382,7 +396,7 @@ def do_spool(recipient: str, message: str, sender: str | None = None) -> str:
         f.flush()
         os.fsync(f.fileno())
     tmp.rename(box / f"{name}.json")
-    # The rename needs syncing too, or "posted" can outlive a power cut
+    # The rename needs syncing too, or "spooled" can outlive a power cut
     # that the message itself does not.
     _fsync_dir(box)
     return f"spooled to {recipient}"
@@ -526,9 +540,9 @@ def main() -> None:
     elif args[0] == "list" and len(args) == 1:
         print(do_list())
     elif args[0] == "send":
-        agent_cli(args[1:], default_post=False)
+        agent_cli(args[1:], default_post=False, prog=f"{name} send")
     elif args[0] == "post":
-        agent_cli(args[1:], default_post=True)
+        agent_cli(args[1:], default_post=True, prog=f"{name} post")
     elif args[0] == "spool" and len(args) in (3, 4):
         print(do_spool(args[1], args[2],
                        args[3] if len(args) == 4 else None))

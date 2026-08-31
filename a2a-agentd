@@ -294,6 +294,10 @@ class CliAgentExecutor(AgentExecutor):
             fd = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(json.dumps(dropped, indent=1, default=str))
+                # Synced before save_state commits the drop below: the
+                # evidence must not be the less durable half of the pair.
+                f.flush()
+                os.fsync(f.fileno())
             log(f"dropped {len(dropped)} malformed state "
                 f"entr{'y' if len(dropped) == 1 else 'ies'} "
                 f"({', '.join(map(repr, dropped))}); values kept in {aside}")
