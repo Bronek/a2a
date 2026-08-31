@@ -20,7 +20,7 @@ access but no MCP client:
   a2a-mcp send|post -c ... "msg"        the same two, spelled as verbs;
                                         --send / --post override either
   a2a-mcp list                          which daemons are up (no key sent)
-  a2a-mcp post <recipient> <msg> [sender]   drop mail into a box
+  a2a-mcp spool <recipient> <msg> [sender]  drop mail into a box
   a2a-mcp mail <recipient>                  drain a box now
   a2a-mcp watch <recipient> [timeout]       block until mail, then drain
 
@@ -33,12 +33,7 @@ message words are joined with single spaces; quote (or use --) when the
 exact text matters or it starts with a dash. There is no REPL: to
 continue a conversation, send again with the same address.
 
-NB `a2a-post` (an agent runs a turn; -c required) and `a2a-mcp post`
-(a file dropped into a mailbox; bare recipient) are different
-operations that share a word. Their shapes are disjoint, so each
-cross-use fails loudly.
-
-post/mail/watch are the asynchronous mailbox: `post` drops a message
+spool/mail/watch are the asynchronous mailbox: `spool` drops a message
 into a named box without blocking (findings delivered as they emerge),
 `mail` drains a box now, and `watch` blocks until mail arrives, then
 drains it — run it in the background as a doorbell for a live session.
@@ -65,7 +60,7 @@ CONFIG_FILE = Path.home() / ".config/a2a-agents/agents.toml"
 KEY_FILE = Path.home() / ".config/a2a-agents/api-key"
 MAILBOX_DIR = Path.home() / ".local/state/a2a-agents/mailbox"
 # Bounds, not policy: a looping or mis-instructed worker holding only the
-# post tool would otherwise have an unmetered write primitive, and filling
+# spool tool would otherwise have an unmetered write primitive, and filling
 # the filesystem takes every daemon's save_state down with it.
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_BOX_MESSAGES = 2000
@@ -279,7 +274,7 @@ def agent_cli(argv: list[str], default_post: bool) -> None:
     if not args.context:
         die(f"-c AGENT[/CONTEXT] is required, agent one of "
             f"{', '.join(conf)} (for a MAILBOX drop, which needs no agent, "
-            f"use `a2a-mcp post <box> <msg>`)")
+            f"use `a2a-mcp spool <box> <msg>`)")
     agent, ctx = parse_address(args.context, conf)
 
     text_in = " ".join(args.message) if args.message else None
@@ -343,7 +338,7 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def do_post(recipient: str, message: str, sender: str | None = None) -> str:
+def do_spool(recipient: str, message: str, sender: str | None = None) -> str:
     box = _box(recipient)
     size = len(message.encode())
     if size > MAX_MESSAGE_BYTES:
@@ -390,7 +385,7 @@ def do_post(recipient: str, message: str, sender: str | None = None) -> str:
     # The rename needs syncing too, or "posted" can outlive a power cut
     # that the message itself does not.
     _fsync_dir(box)
-    return f"posted to {recipient}"
+    return f"spooled to {recipient}"
 
 
 def deliver_stdout(text: str) -> None:
@@ -450,7 +445,7 @@ def do_check(recipient: str, wait: bool = False,
     for p in drained:
         p.unlink(missing_ok=True)
     for p in unreadable:
-        # Dot-prefixed, so drains skip it; do_post's sweep reaps it later.
+        # Dot-prefixed, so drains skip it; do_spool's sweep reaps it later.
         try:
             p.rename(p.with_name(f".bad-{p.name}"))
         except OSError:
@@ -487,14 +482,14 @@ def serve() -> None:
         return out
 
     @mcp.tool()
-    def post(recipient: str, message: str, sender: str | None = None) -> str:
-        """Post a message into a local mailbox WITHOUT blocking — use it to
+    def spool(recipient: str, message: str, sender: str | None = None) -> str:
+        """Spool a message into a local mailbox WITHOUT blocking — use it to
         deliver findings or progress to a leading session as they emerge
         (conventional recipients: "lead" for the orchestrating session,
         "bronek" for the human), instead of saving everything for one final
         reply. One-way: at-least-once, no read receipt. sender defaults to
         your mesh identity (agent/context) when running as a mesh worker."""
-        return do_post(recipient, message, sender)
+        return do_spool(recipient, message, sender)
 
     @mcp.tool()
     def check_mail(recipient: str) -> str:
@@ -511,17 +506,14 @@ USAGE = """usage: a2a-mcp                        (MCP stdio server)
        a2a-post -c AGENT[/CONTEXT] [--workdir DIR | --here] "msg"
        a2a-mcp send|post -c ...       (the same two, spelled as verbs)
        a2a-mcp list
-       a2a-mcp post <recipient> <message> [sender]      (mailbox)
+       a2a-mcp spool <recipient> <message> [sender]     (mailbox)
        a2a-mcp mail <recipient>
        a2a-mcp watch <recipient> [timeout-seconds]"""
 
 
 def main() -> None:
     # a2a-send and a2a-post are this script under other names: the two
-    # agent-message personalities, wait and fire-and-forget. NB the name
-    # collision documented in the module docstring: `a2a-post` runs a turn
-    # (-c required); `a2a-mcp post` drops mail (bare recipient). The
-    # shapes are disjoint, so each cross-use fails loudly.
+    # agent-message personalities, wait and fire-and-forget.
     name = Path(sys.argv[0]).name
     if name == "a2a-send":
         return agent_cli(sys.argv[1:], default_post=False)
@@ -535,11 +527,11 @@ def main() -> None:
         print(do_list())
     elif args[0] == "send":
         agent_cli(args[1:], default_post=False)
-    elif args[0] == "post" and len(args) >= 2 and args[1].startswith("-"):
-        # `post -c …` is the agent verb; `post <recipient> …` the mailbox.
+    elif args[0] == "post":
         agent_cli(args[1:], default_post=True)
-    elif args[0] == "post" and len(args) in (3, 4):
-        print(do_post(args[1], args[2], args[3] if len(args) == 4 else None))
+    elif args[0] == "spool" and len(args) in (3, 4):
+        print(do_spool(args[1], args[2],
+                       args[3] if len(args) == 4 else None))
     elif args[0] == "mail" and len(args) == 2:
         do_check(args[1], deliver=deliver_stdout)
     elif args[0] == "watch" and len(args) in (2, 3):

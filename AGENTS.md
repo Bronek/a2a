@@ -27,12 +27,12 @@ Rules that matter:
 
 ## The mailbox (asynchronous, one-way)
 
-Long tasks should not save everything for one final reply. The `post` tool
-(`a2a-mcp post <recipient> <message>` from a shell) drops a message into a
-named box without blocking; `check_mail` / `a2a-mcp mail <recipient>`
-drains one. Conventions:
+Long tasks should not save everything for one final reply. The `spool`
+tool (`a2a-mcp spool <recipient> <message>` from a shell) drops a message
+into a named box without blocking; `check_mail` / `a2a-mcp mail
+<recipient>` drains one. Conventions:
 
-- Post findings to **`lead`** as they emerge — per subagent result, per
+- Spool findings to **`lead`** as they emerge — per subagent result, per
   phase — then still finish with a proper final reply to your caller.
   The box **`bronek`** reaches the human.
 - Delivery is at-least-once with no read receipt: fine for reports and

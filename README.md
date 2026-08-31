@@ -42,7 +42,7 @@ supported; each runs as its own daemon, launched and observed separately.
   first, so a refusal the daemon makes before starting work – an unpinned
   workdir, a mismatched pin – is still reported rather than lost. `--post`
   and `--send` select the behaviour explicitly, under any name.
-- The **mailbox** – `post` and `check_mail` tools (CLI: `post`, `mail`,
+- The **mailbox** – `spool` and `check_mail` tools (CLI: `spool`, `mail`,
   `watch`) – gives the mesh an asynchronous edge: a worker deep in a long
   task posts findings to a named box as they emerge, instead of saving
   everything for one final reply. A live session runs `a2a-mcp watch lead`
