@@ -16,6 +16,7 @@ Usage:
                                     (required on a context's first message)
 
 REPL commands: /context [id]  show or switch context
+               /workdir [dir] show or set the workdir a NEW context pins
                /new           start a fresh context
                /exit
 """
@@ -140,6 +141,8 @@ def repl(client: httpx.Client, agent: str, context_id: str,
     except ImportError:
         pass
     print(f"--- {agent} | context {context_id} | /exit to quit ---")
+    print(f"    workdir {workdir}" if workdir else
+          "    no workdir — a new context needs one: /workdir <dir>")
     last_native = None
     while True:
         try:
@@ -151,15 +154,27 @@ def repl(client: httpx.Client, agent: str, context_id: str,
             continue
         if line in ("/exit", "/quit", "exit", "quit"):
             return
+        if line.startswith("/workdir"):
+            arg = line.removeprefix("/workdir").strip()
+            if arg:
+                workdir = str(Path(arg).expanduser())
+            print(f"workdir: {workdir or '(unset)'}")
+            continue
         if line.startswith("/context"):
             arg = line.removeprefix("/context").strip()
             if arg:
-                context_id, last_native = arg, None
-            print(f"context: {context_id}")
+                # An existing conversation already carries its own pin, and
+                # offering ours could only trip the mismatch refusal. Use
+                # /workdir afterwards if this name is in fact a new context.
+                context_id, last_native, workdir = arg, None, None
+            print(f"context: {context_id} | workdir: {workdir or '(pinned)'}")
             continue
         if line == "/new":
+            # A fresh context in the same directory is the common case, so
+            # the workdir carries over.
             context_id, last_native = str(uuid.uuid4()), None
-            print(f"context: {context_id}")
+            print(f"context: {context_id} | "
+                  f"workdir: {workdir or '(unset — /workdir <dir>)'}")
             continue
         try:
             text, meta = send(client, context_id, line, workdir)
