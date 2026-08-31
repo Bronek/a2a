@@ -41,7 +41,10 @@ drains one. Conventions:
 - If a tool call fails — approval unavailable, server unreachable, any
   reason — REPORT the failure. Never reply as if the action succeeded.
 - When running as a mesh worker your posts self-identify (agent/context)
-  via the A2A_AGENT / A2A_CONTEXT environment variables.
+  via the A2A_AGENT / A2A_CONTEXT environment variables. If your runtime
+  strips those from MCP server processes (codex does) your posts arrive
+  "from unknown" — pass the `sender` parameter explicitly, e.g.
+  `sender="codex"`.
 
 About this repository: README.md documents the design. The daemons run as
 `systemd --user` units `a2a-agent@<name>`, and each agent's activity log is

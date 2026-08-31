@@ -39,7 +39,14 @@ extra_args = ["--allowed-mcp-server-names", "a2a"]
 kind = "codex"
 command = "codex"
 port = 8001
-extra_args = []
+# Headless codex pins approval_policy to "never", which REFUSES anything
+# needing approval (MCP tool calls included). --approve-for-me routes
+# approvals through codex's automatic reviewer instead — a machine gate per
+# action — at the price of widening the sandbox to workspace-write.
+# --disable apps removes the built-in ChatGPT-apps tool suite, which has no
+# business in a headless worker.
+extra_args = ["-c", "model_reasoning_effort=high",
+              "--approve-for-me", "--disable", "apps"]
 
 [kimi]
 kind = "kimi"

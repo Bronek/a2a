@@ -46,6 +46,13 @@ supported; each runs as its own daemon, launched and observed separately.
   to the workspaces that carry it. Both are acceptable here because the
   tools only reach the local mesh, and the receiving workers keep their
   own permission gates – the boundary that actually matters.
+  For codex, headless `exec` pins `approval_policy` to `never`, which
+  *refuses* whatever would need approval (MCP tool calls included);
+  `--approve-for-me` in its `extra_args` routes approvals through codex's
+  automatic reviewer instead, with a workspace-write sandbox, and
+  `--disable apps` strips the built-in ChatGPT-apps tool suite from the
+  worker. NB codex also sanitises the environment it hands MCP servers,
+  so its mailbox posts should pass `sender` explicitly.
   The same operations double as a CLI: `a2a-mcp list`,
   `a2a-mcp send <agent> <context> <message>`.
 - The **mailbox** – `post` / `check_mail` tools (CLI: `post`, `mail`,

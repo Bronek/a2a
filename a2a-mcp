@@ -175,10 +175,13 @@ def do_post(recipient: str, message: str, sender: str | None = None) -> str:
     box = _box(recipient)
     if not sender:
         # Inside a mesh worker the daemon exports these, so posts
-        # self-identify down to the conversation they came from.
+        # self-identify down to the conversation they came from. Some CLIs
+        # (codex) sanitise the env they hand to MCP servers, losing them —
+        # such agents should pass `sender` explicitly instead.
         agent = os.environ.get("A2A_AGENT")
         ctx = os.environ.get("A2A_CONTEXT")
-        sender = f"{agent}/{ctx}" if agent else "unknown"
+        sender = (f"{agent}/{ctx}" if agent and ctx
+                  else agent or "unknown")
     name = f"{time.time_ns()}-{uuid.uuid4().hex[:8]}"
     tmp = box / f".{name}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
