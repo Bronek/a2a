@@ -3,11 +3,10 @@
 # requires-python = ">=3.11"
 # dependencies = ["httpx>=0.27"]
 # ///
-"""REPL / one-shot client for the local A2A agent daemons.
+"""One-shot client for the local A2A agent daemons.
 
 Usage:
-  a2a-chat --context AGENT[/CONTEXT]           interactive REPL
-  a2a-chat --context AGENT/CONTEXT "msg"       one-shot, prints the reply
+  a2a-chat --context AGENT/CONTEXT "msg"       say it, print the reply
                                                (exit 2 on a worker error)
   a2a-chat --context AGENT/CONTEXT -- words …  bare words are joined with
                                                single spaces; quote instead
@@ -23,12 +22,10 @@ Usage:
                                                --here means the current one
 
 The address is <agent>/<context>: one token, so the agent cannot drift away
-from the conversation it scopes. Leave the context off for a fresh one.
-
-REPL commands: /context [id]  show or switch context
-               /workdir [dir] show or set the workdir a NEW context pins
-               /new           start a fresh context
-               /exit
+from the conversation it scopes. Leave the context off for a fresh one (its
+generated name is printed, so the conversation can be continued). There is
+no REPL: to continue a conversation, send another one-shot with the same
+--context.
 """
 import argparse
 import json
@@ -174,94 +171,6 @@ def post(client: httpx.Client, agent: str, context_id: str, text: str,
     print(reply)
 
 
-def repl(client: httpx.Client, agent: str, context_id: str,
-         workdir: str | None) -> None:
-    try:
-        import readline  # noqa: F401  (line editing / history)
-    except ImportError:
-        pass
-    print(f"--- {agent} | context {context_id} | /exit to quit ---")
-    print(f"    workdir {workdir}" if workdir else
-          "    no workdir — a new context needs one: /workdir <dir>")
-    last_native = None
-    while True:
-        try:
-            line = input(f"[{agent}] > ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            return
-        if not line:
-            continue
-        if line in ("/exit", "/quit", "exit", "quit"):
-            return
-        # Dispatch on the whole first word: startswith() would read a typo
-        # like /workdirfoo as "/workdir foo" and act on it, deferring the
-        # surprise to a daemon refusal much later.
-        cmd, _, cmd_arg = line.partition(" ")
-        if line.startswith("/") and cmd not in ("/workdir", "/context",
-                                                "/new"):
-            print(f"\n[error] unknown command {cmd!r} "
-                  f"(commands: /context /workdir /new /exit; to send a "
-                  f"message that starts with '/', use the one-shot form)\n")
-            continue
-        if cmd == "/workdir":
-            arg = cmd_arg.strip()
-            if arg:
-                workdir = str(Path(arg).expanduser().resolve())
-            print(f"workdir: {workdir or '(unset)'}")
-            continue
-        if cmd == "/context":
-            arg = cmd_arg.strip()
-            if arg and "/" in arg:
-                # A REPL holds one daemon's connection, so an address for
-                # another agent cannot be honoured here — and taking it
-                # verbatim would create a context literally named
-                # "kimi/slice-a" on THIS agent, which is the misroute the
-                # address form exists to prevent.
-                head, _, tail = arg.partition("/")
-                if head != agent:
-                    print(f"\n[error] {arg!r} addresses {head!r}, but this "
-                          f"REPL is connected to {agent!r} — run "
-                          f"`a2a-chat --context {arg}` instead\n")
-                    continue
-                if not tail:
-                    print(f"\n[error] nothing after {head!r}/\n")
-                    continue
-                arg = tail
-            if arg:
-                # An existing conversation already carries its own pin, and
-                # offering ours could only trip the mismatch refusal. Use
-                # /workdir afterwards if this name is in fact a new context.
-                context_id, last_native, workdir = arg, None, None
-            print(f"context: {context_id} | workdir: {workdir or '(pinned)'}")
-            continue
-        if line == "/new":
-            # A fresh context in the same directory is the common case, so
-            # the workdir carries over.
-            context_id, last_native = str(uuid.uuid4()), None
-            print(f"context: {context_id} | "
-                  f"workdir: {workdir or '(unset — /workdir <dir>)'}")
-            continue
-        try:
-            text, meta = send(client, context_id, line, workdir)
-        except KeyboardInterrupt:
-            print("\n[interrupted locally — the worker still finishes this "
-                  "turn server-side; its reply is lost but the session "
-                  "advances]\n")
-            continue
-        except Exception as err:
-            print(f"\n[error] {err}\n")
-            continue
-        native = meta.get("native_session_id")
-        if native and native != last_native:
-            print(f"(native {agent} session: {native})")
-            last_native = native
-        if meta.get("error"):
-            print(f"\n[worker error] {text}\n")
-            continue
-        print(f"\n{text}\n")
-
-
 def parse_address(text: str, conf: dict) -> tuple:
     """Split `<agent>[/<context>]`, the address of one conversation.
 
@@ -281,7 +190,7 @@ def main() -> None:
     # quoted; quote it (or use --) when the exact text matters or it starts
     # with a dash.
     ap.add_argument("message", nargs="*",
-                    help="one-shot message; without one, a2a-chat opens a REPL")
+                    help="the message to send")
     # The agent lives inside the address rather than in an argument of its
     # own: naming it is then unavoidable, and it cannot be separated from
     # the context it scopes.
@@ -301,8 +210,8 @@ def main() -> None:
                       help="say the message and exit without waiting; the "
                            "worker still runs the turn (default as a2a-post)")
     mode.add_argument("--chat", action="store_true",
-                      help="wait for the reply, or open a REPL when there is "
-                           "no message (default as a2a-chat)")
+                      help="wait for the reply and print it "
+                           "(the default as a2a-chat)")
     args = ap.parse_args()
 
     # Invocation name selects the mode, so a2a-post is a symlink to this
@@ -351,7 +260,8 @@ def main() -> None:
                 sys.exit(2)
             print(text)
         else:
-            repl(client, args.agent, context_id, args.workdir)
+            die("nothing to send — give a message; to continue a "
+                "conversation, run another one-shot with the same --context")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 # a2a – a local mesh of agent CLIs
 
 Agent CLI tools from different labs, wrapped as [A2A](https://a2a-protocol.org)
-servers on loopback ports, so that they can be driven uniformly – by a human at
-a REPL, or by one another. The point of mixing labs is divergence: models with
+servers on loopback ports, so that they can be driven uniformly – by a human
+at a shell, or by one another. The point of mixing labs is divergence: models with
 different training do not share blind spots, which makes their agreement worth
 more and their disagreement informative. Claude, Gemini, Codex and Kimi are
 supported; each runs as its own daemon, launched and observed separately.
@@ -14,10 +14,11 @@ supported; each runs as its own daemon, launched and observed separately.
   virtualenv to manage) serving the A2A protocol – JSON-RPC `message/send` –
   on `127.0.0.1:<port>`, with the real work delegated to the CLI in
   non-interactive mode.
-- `a2a-chat --context <agent>/<context>` – REPL and one-shot client. With a
-  message it says it and prints the reply; without one it opens a REPL,
-  where `/context`, `/workdir` and `/new` steer. `--status` shows which
-  daemons are up, and `--workdir` pins a new conversation to its project.
+- `a2a-chat --context <agent>/<context> "msg"` – one-shot client: says the
+  message, prints the reply. Continuing a conversation is another one-shot
+  with the same address; there is deliberately no REPL to hold state of its
+  own. `--status` shows which daemons are up, and `--workdir` pins a new
+  conversation to its project.
   The address is one token, and the agent is inside it: the agents are
   peers, so an agent that could be defaulted, or left in a separate
   argument, is an agent that can drift away from the conversation it
@@ -159,7 +160,6 @@ rather than ignoring it silently.
 ```
 systemctl --user start a2a-agent@{claude,gemini,codex,kimi}
 a2a-chat --status
-a2a-chat --context kimi                        # REPL on a fresh context
 a2a-chat --context codex/review-42 --workdir ~/gits/proj "…"
                                                # one-shot; --workdir pins a
                                                # new context to its project
@@ -187,7 +187,7 @@ life. Several CLIs scope their session stores to the directory they run in,
 so moving a conversation would orphan its session. A new context therefore
 refuses to start without one: pass it as message metadata
 `{"workdir": "/path"}` – via `a2a-chat --workdir`, `--here` for the current
-directory, or the REPL's `/workdir`,
+directory,
 the MCP `send` tool's `workdir` argument, or, in A2A Inspector, the
 **Message Metadata** field on the chat's first message. Paths are resolved by the client, where you are,
 rather than by the daemon, whose own directory is `~` and never the project
