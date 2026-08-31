@@ -33,6 +33,7 @@ Configuration (~/.config/a2a-agents/agents.toml) and the API key are
 shared with a2a-agentd / a2a-chat.
 """
 import json
+import math
 import os
 import re
 import sys
@@ -197,33 +198,66 @@ def do_post(recipient: str, message: str, sender: str | None = None) -> str:
     return f"posted to {recipient}"
 
 
+def deliver_stdout(text: str) -> None:
+    """Write a batch out and make sure it has actually left the process,
+    so a broken pipe is raised here — while the mail still exists."""
+    print(text)
+    sys.stdout.flush()
+
+
 def do_check(recipient: str, wait: bool = False,
-             timeout: float | None = None) -> str:
+             timeout: float | None = None, deliver=None) -> str:
     box = _box(recipient)
-    deadline = time.monotonic() + timeout if timeout else None
+    if timeout is not None and math.isnan(timeout):
+        raise ValueError("timeout must be a number, not NaN")
+    # `is not None`: a zero timeout asks for no waiting, not for no limit,
+    # so `watch <box> 0` polls once rather than blocking for ever.
+    deadline = time.monotonic() + timeout if timeout is not None else None
     while True:
         files = sorted(p for p in box.iterdir()
                        if p.suffix == ".json" and not p.name.startswith("."))
         if files or not wait:
             break
-        if deadline and time.monotonic() > deadline:
+        if deadline is not None and time.monotonic() > deadline:
             break
         time.sleep(1)
     if not files:
-        return f"no mail for {recipient}"
-    out = []
+        empty = f"no mail for {recipient}"
+        if deliver is not None:
+            deliver(empty)
+        return empty
+    out, drained = [], []
     for p in files:
         try:
             m = json.loads(p.read_text())
+            if not isinstance(m, dict):
+                raise ValueError("not a JSON object")
         except FileNotFoundError:
             continue  # a concurrent drain won this one
-        except ValueError:
-            p.unlink(missing_ok=True)
+        except (ValueError, OSError) as err:
+            # Quarantine rather than raise. An entry that cannot be read
+            # must not strand the messages already collected, and must not
+            # stay in the box wedging every future drain.
+            bad = p.with_name(f".bad-{p.name}")
+            try:
+                p.rename(bad)
+            except OSError:
+                pass
+            out.append(f"[?] from ?:\n[unreadable entry quarantined as "
+                       f"{bad.name}: {err}]")
             continue
         out.append(f"[{m.get('ts', '?')}] from {m.get('from', '?')}:\n"
                    f"{m.get('text', '')}")
+        drained.append(p)
+    text = "\n\n---\n\n".join(out) or f"no mail for {recipient}"
+    # Hand the batch over before destroying it: unlinking first loses the
+    # mail outright if delivery then fails, and `mail lead | head` closing
+    # the pipe is enough to make it fail.
+    if deliver is not None:
+        deliver(text)
+    for p in drained:
         p.unlink(missing_ok=True)
-    return "\n\n---\n\n".join(out) or f"no mail for {recipient}"
+    return text
 
 
 def serve() -> None:
@@ -289,10 +323,10 @@ def main() -> None:
     elif args[0] == "post" and len(args) in (3, 4):
         print(do_post(args[1], args[2], args[3] if len(args) == 4 else None))
     elif args[0] == "mail" and len(args) == 2:
-        print(do_check(args[1]))
+        do_check(args[1], deliver=deliver_stdout)
     elif args[0] == "watch" and len(args) in (2, 3):
-        print(do_check(args[1], wait=True,
-                       timeout=float(args[2]) if len(args) == 3 else None))
+        do_check(args[1], wait=True, deliver=deliver_stdout,
+                 timeout=float(args[2]) if len(args) == 3 else None)
     else:
         sys.exit("usage: a2a-mcp                      (MCP stdio server)\n"
                  "       a2a-mcp list\n"
@@ -303,4 +337,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # The consumer closed the pipe (`a2a-mcp mail lead | head`). The
+        # batch never landed, so do_check deliberately left the mail in the
+        # box; report that on stderr, and point stdout at /dev/null so the
+        # interpreter's shutdown flush does not raise a second time.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit("a2a-mcp: output cut off by the consumer — "
+                 "mail left in the box")
