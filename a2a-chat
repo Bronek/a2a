@@ -6,13 +6,13 @@
 """REPL / one-shot client for the local A2A agent daemons.
 
 Usage:
-  a2a-chat [agent]                  interactive REPL (default agent: claude)
-  a2a-chat [agent] --send "msg"     one-shot, prints the reply and exits
+  a2a-chat <agent>                  interactive REPL
+  a2a-chat <agent> --send "msg"     one-shot, prints the reply and exits
                                     (exit 2 if the worker reported an error)
   a2a-chat --status                 show which daemons are up (needs no key)
-  a2a-chat [agent] --context ID     use a chosen A2A context id (any string);
+  a2a-chat <agent> --context ID     use a chosen A2A context id (any string);
                                     the daemon maps it to a native CLI session
-  a2a-chat [agent] --workdir DIR    pin a NEW context's working directory
+  a2a-chat <agent> --workdir DIR    pin a NEW context's working directory
                                     (required on a context's first message)
 
 REPL commands: /context [id]  show or switch context
@@ -198,7 +198,10 @@ def repl(client: httpx.Client, agent: str, context_id: str,
 
 def main() -> None:
     ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("agent", nargs="?", default="claude")
+    # No default: the agents are peers, and every context name is valid on
+    # every one of them, so a defaulted agent cannot fail — it silently
+    # opens a new conversation on the wrong worker.
+    ap.add_argument("agent", nargs="?")
     ap.add_argument("--context", help="A2A context id to use / resume")
     ap.add_argument("--workdir", help="working directory to pin a NEW "
                     "context to (required on a context's first message)")
@@ -211,6 +214,9 @@ def main() -> None:
     if args.status:
         show_status(conf)
         return
+    if not args.agent:
+        die(f"name an agent: one of {', '.join(conf)} "
+            f"(only --status works without one)")
     if args.agent not in conf:
         die(f"unknown agent {args.agent!r} (one of: {', '.join(conf)})")
 
