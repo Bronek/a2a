@@ -29,7 +29,12 @@ supported; each runs as its own daemon, launched and observed separately.
   prompt a project-level `.kimi-code/mcp.json` would require – plus an
   `allow` rule for `mcp__a2a__*` in `~/.kimi-code/config.toml`, because
   headless `kimi -p` (as run by `a2a-agent@kimi`) cannot answer
-  approval prompts.
+  approval prompts. Similarly, for gemini, its daemon requires
+  `extra_args = ["--allowed-mcp-server-names", "a2a"]` in
+  `~/.config/a2a-agents/agents.toml` to connect to the server; to bypass
+  approval prompts in headless mode, the `a2a` server must be configured
+  with `"trust": true` – either globally in `~/.gemini/settings.json`, or
+  via a `.mcp.json` file in every project directory the agent visits.
   The same operations double as a CLI: `a2a-mcp list`,
   `a2a-mcp send <agent> <context> <message>`.
 - The **mailbox** – `post` / `check_mail` tools (CLI: `post`, `mail`,

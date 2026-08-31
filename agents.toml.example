@@ -33,7 +33,7 @@ port = 8003
 # .gemini/ config run as you — list only trees whose content you trust.
 # trusted_workdirs = ["~/gits"]
 # extra_args = ["--approval-mode", "auto_edit"]
-extra_args = []
+extra_args = ["--allowed-mcp-server-names", "a2a"]
 
 [codex]
 kind = "codex"
