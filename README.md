@@ -113,4 +113,7 @@ emitting gigabytes could OOM its daemon. And while status checks are
 anonymous by design, a `message/send` necessarily presents the key to
 whatever holds the port – if a daemon is down, a local squatter on its port
 could harvest it; a unix-socket transport would close that hole and is
-future work.
+future work. Finally, turns within one context are serialised server-side:
+a second send into a busy context waits invisibly for the first to finish,
+so its client may time out while the turn still runs – and completes – on
+the daemon; send concurrent work to different contexts, not into one.

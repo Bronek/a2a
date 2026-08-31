@@ -79,7 +79,7 @@ def do_list() -> str:
             if r.status_code == 200:
                 try:
                     state = f"up — {r.json().get('description', '')}"
-                except ValueError:
+                except (ValueError, AttributeError):
                     state = "answers, but not with an agent card"
             else:
                 state = f"HTTP {r.status_code}"
@@ -89,14 +89,15 @@ def do_list() -> str:
     return "\n".join(lines)
 
 
-def do_send(agent: str, context: str, message: str) -> str:
+def do_send(agent: str, context: str, message: str) -> tuple[str, bool]:
+    """Return (reply_text, failed)."""
     conf = load_conf()
     if agent not in conf:
-        return f"ERROR: unknown agent {agent!r} (one of: {', '.join(conf)})"
+        return f"ERROR: unknown agent {agent!r} (one of: {', '.join(conf)})", True
     key = read_key()
     if not key:
         return (f"ERROR: {KEY_FILE} not found or empty — "
-                f"start a daemon once to create it")
+                f"start a daemon once to create it"), True
     cfg = conf[agent]
     payload = {
         "jsonrpc": "2.0",
@@ -120,17 +121,22 @@ def do_send(agent: str, context: str, message: str) -> str:
             r.raise_for_status()
             data = r.json()
     except httpx.HTTPError as err:
-        return f"ERROR: {agent} daemon unreachable or failed: {err}"
+        return f"ERROR: {agent} daemon unreachable or failed: {err}", True
+    except ValueError:
+        return (f"ERROR: {agent} port answered HTTP 200 with a non-JSON "
+                f"body — probably not an a2a-agentd"), True
     if "error" in data:
         return (f"ERROR: A2A {data['error'].get('code')}: "
-                f"{data['error'].get('message')}")
+                f"{data['error'].get('message')}"), True
+    if "result" not in data:
+        return f"ERROR: {agent} returned malformed JSON-RPC (no result)", True
     text, meta = extract_text(data["result"])
     native = meta.get("native_session_id")
     tail = f"\n\n[{agent} / context {context}" \
            + (f" / native session {native}]" if native else "]")
     if meta.get("error"):
-        return f"ERROR (worker-side): {text}" + tail
-    return text + tail
+        return f"ERROR (worker-side): {text}" + tail, True
+    return text + tail, False
 
 
 def serve() -> None:
@@ -145,14 +151,17 @@ def serve() -> None:
     @mcp.tool()
     def send(agent: str, context: str, message: str) -> str:
         """Send a message to an agent on the local A2A mesh; blocks until the
-        agent replies (can take minutes for real work). A reply starting
-        with "ERROR" means the turn failed — do not treat it as content.
+        agent replies (can take minutes for real work). A failed turn
+        raises a tool error instead of returning text.
 
         agent: a name from list_agents (e.g. codex, kimi, gemini, claude).
         context: conversation id, any string; reuse it to continue that
         conversation, use a fresh one to start over.
         message: the prompt to deliver."""
-        return do_send(agent, context, message)
+        out, failed = do_send(agent, context, message)
+        if failed:
+            raise RuntimeError(out)
+        return out
 
     mcp.run()
 
@@ -164,9 +173,9 @@ def main() -> None:
     elif args[0] == "list" and len(args) == 1:
         print(do_list())
     elif args[0] == "send" and len(args) == 4:
-        out = do_send(args[1], args[2], args[3])
+        out, failed = do_send(args[1], args[2], args[3])
         print(out)
-        if out.startswith("ERROR"):
+        if failed:
             sys.exit(2)
     else:
         sys.exit("usage: a2a-mcp                      (MCP stdio server)\n"

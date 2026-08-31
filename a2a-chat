@@ -68,7 +68,7 @@ def show_status(conf: dict) -> None:
             if r.status_code == 200:
                 try:
                     state = f"up ({r.json().get('name')})"
-                except ValueError:
+                except (ValueError, AttributeError):
                     state = "answers, but not with an agent card"
                 break
             state = f"HTTP {r.status_code}"
@@ -114,10 +114,15 @@ def send(client: httpx.Client, context_id: str, text: str) -> tuple[str, dict]:
     }
     r = client.post("/", json=payload)
     r.raise_for_status()
-    data = r.json()
+    try:
+        data = r.json()
+    except ValueError:
+        raise RuntimeError("daemon answered HTTP 200 with a non-JSON body")
     if "error" in data:
         raise RuntimeError(f"A2A error {data['error'].get('code')}: "
                            f"{data['error'].get('message')}")
+    if "result" not in data:
+        raise RuntimeError("malformed JSON-RPC response: no result")
     return extract_text(data["result"])
 
 
@@ -189,7 +194,7 @@ def main() -> None:
         if args.send:
             try:
                 text, meta = send(client, context_id, args.send)
-            except httpx.HTTPError as err:
+            except (httpx.HTTPError, RuntimeError) as err:
                 die(f"{args.agent} daemon unreachable or failed: {err}")
             native = meta.get("native_session_id")
             if native:

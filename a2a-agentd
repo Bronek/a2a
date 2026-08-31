@@ -54,6 +54,7 @@ def load_or_create_key() -> str:
     if not KEY_FILE.exists():
         KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = KEY_FILE.with_name(f".api-key.{os.getpid()}.tmp")
+        tmp.unlink(missing_ok=True)  # stale leftover after PID reuse
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(secrets.token_hex(32) + "\n")
@@ -111,8 +112,10 @@ class CliAdapter:
             return [c, "-p", "--output-format", "json", *sel, *self.extra], prompt
         if self.kind == "gemini":
             sel = ["--resume", native_id] if resume else ["--session-id", native_id]
-            # headless gemini refuses untrusted workspaces; bypass the prompt
-            # only when the configuration vouches for the workdir
+            # headless gemini refuses untrusted workspaces; bypass only when
+            # the configuration vouches for the workdir. NB `-p ""` + stdin
+            # is lightly documented but verified behaviour ("Appended to
+            # input on stdin"): the prompt arrives wholly via stdin.
             trust = ["--skip-trust"] if self.trust else []
             return [c, "-o", "json", *trust, *sel, *self.extra, "-p", ""], prompt
         if self.kind == "codex":
@@ -186,7 +189,16 @@ class CliAgentExecutor(AgentExecutor):
         self.state_file = STATE_DIR / f"{name}.json"
         self.sessions: dict[str, str] = {}
         if self.state_file.exists():
-            self.sessions = json.loads(self.state_file.read_text())
+            try:
+                self.sessions = json.loads(self.state_file.read_text())
+            except ValueError:
+                # The mesh survives state loss by design (create-collision
+                # retry); refusing to start on unreadable state would be
+                # strictly worse than starting empty.
+                bad = self.state_file.with_suffix(
+                    f".corrupt-{int(time.time())}")
+                self.state_file.rename(bad)
+                log(f"state file was corrupt; moved to {bad}, starting empty")
         self.locks: dict[str, asyncio.Lock] = {}
 
     def save_state(self) -> None:
@@ -237,36 +249,52 @@ class CliAgentExecutor(AgentExecutor):
             log(f"[{ctx_id!r}] {'resume' if resume else 'new'} "
                 f"native={native or '(cli-chosen)'} prompt={prompt[:60]!r}")
             t0 = time.monotonic()
-            rc, stdout, stderr = await self._invoke(cmd, stdin_text, env)
+            rc, stdout, stderr = await self._invoke(cmd, stdin_text, env,
+                                                    self.timeout)
             # Two recoverable session mishaps, retried once in the opposite
             # mode: a create that collides with an existing session (state
             # was lost), and a resume of a session the CLI no longer has
-            # (CLIs expire or directory-scope their stores).
+            # (CLIs expire or directory-scope their stores). The matching is
+            # anchored to session-lookup phrases on purpose: those fail at
+            # startup before the agent does any work, so the retry cannot
+            # repeat side effects of a partially-run turn.
             retry: bool | None = None
             low = stderr.lower()
             if (rc != 0 and not resume and not self.adapter.chooses_own_id()
-                    and "already" in low):
+                    and "already" in low and "session" in low):
                 retry = True
                 log(f"[{ctx_id!r}] create collided with existing session, "
                     f"retrying as resume")
-            elif rc != 0 and resume and ("invalid session" in low
-                                         or "not found" in low
-                                         or "different directory" in low):
+            elif rc != 0 and resume and (
+                    "invalid session" in low          # gemini
+                    or "no conversation found" in low  # claude
+                    or "session not found" in low
+                    or "different directory" in low):  # kimi
+                # NB deliberately narrow: a bare "not found" in stderr must
+                # not repoint the context and orphan a healthy session
                 retry = False
                 log(f"[{ctx_id!r}] resume failed ({stderr.strip()[:120]!r}), "
                     f"starting a fresh native session")
             if retry is not None:
                 resume = retry
-                if not resume and self.adapter.chooses_own_id():
-                    native = None
+                if not resume:
+                    # Recovery path: nothing needs the deterministic id any
+                    # more, and reusing it can wedge on a CLI that refuses an
+                    # id existing elsewhere — take a genuinely fresh one.
+                    native = (None if self.adapter.chooses_own_id()
+                              else str(uuid.uuid4()))
                 cmd, stdin_text = self.adapter.build(prompt, native, resume,
                                                      lm.name)
-                rc, stdout, stderr = await self._invoke(cmd, stdin_text, env)
+                # The retry inherits the remaining budget, so the two
+                # attempts together stay within the client's expectations.
+                left = max(60.0, self.timeout - (time.monotonic() - t0))
+                rc, stdout, stderr = await self._invoke(cmd, stdin_text, env,
+                                                        left)
             dt = time.monotonic() - t0
             if rc != 0:
                 raise RuntimeError(
                     f"{cmd[0]} exited {rc} after {dt:.0f}s: "
-                    f"{stderr.strip()[:500]}")
+                    f"{stderr.strip()[:500]!r}")
             try:
                 text, parsed_id = self.adapter.parse(stdout, lm.name)
             except Exception as err:
@@ -283,7 +311,7 @@ class CliAgentExecutor(AgentExecutor):
         return text, native
 
     async def _invoke(self, cmd: list[str], stdin_text: str | None,
-                      env: dict) -> tuple[int, str, str]:
+                      env: dict, timeout: float) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=self.workdir, env=env, start_new_session=True,
             stdin=asyncio.subprocess.PIPE,
@@ -291,16 +319,18 @@ class CliAgentExecutor(AgentExecutor):
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(stdin_text.encode() if stdin_text else None),
-                timeout=self.timeout)
+                timeout=timeout)
         except asyncio.TimeoutError:
-            # SIGKILL the whole process group, not just the CLI wrapper,
-            # so tools the agent spawned do not outlive the failed turn
+            # SIGKILL the whole process group, not just the CLI wrapper, so
+            # tools the agent spawned do not outlive the failed turn. The
+            # saved pid IS the pgid (start_new_session), and stays valid as
+            # a group id even after the leader itself has exited.
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 proc.kill()
             await proc.wait()
-            raise RuntimeError(f"timed out after {self.timeout}s")
+            raise RuntimeError(f"timed out after {timeout:.0f}s")
         return (proc.returncode, stdout.decode(errors="replace"),
                 stderr.decode(errors="replace"))
 
@@ -321,8 +351,16 @@ class KeyAuth:
         self.key = key.encode()
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and not (
-                scope.get("method") == "GET"
+        if scope["type"] == "lifespan":
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] != "http":
+            # Default-deny anything else (e.g. websocket): nothing serves it
+            # today, and it must not arrive unauthenticated if it ever does.
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        if not (scope.get("method") == "GET"
                 and scope.get("path") in self.OPEN_PATHS):
             headers = {k.lower(): v for k, v in scope.get("headers", [])}
             if not secrets.compare_digest(headers.get(b"x-api-key", b""),

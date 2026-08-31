@@ -11,6 +11,9 @@ StartLimitBurst=5
 
 [Service]
 ExecStartPre=/usr/bin/mkdir -p %h/.local/state/a2a-agents
+# Self-applying privacy migration: UMask only protects newly created files,
+# pre-hardening state/logs would otherwise stay world-readable.
+ExecStartPre=/usr/bin/chmod -R go-rwx %h/.local/state/a2a-agents
 ExecStart=%h/.local/bin/a2a-agentd %i
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Logs and state may reference private conversations: no group/other access.
