@@ -318,15 +318,23 @@ class CliAgentExecutor(AgentExecutor):
         if context.message and context.message.metadata:
             req_workdir = context.message.metadata.get("workdir")
         lock = self.locks.setdefault(ctx_id, asyncio.Lock())
-        async with lock:
-            try:
+        try:
+            # Decide refusals before queueing behind a running turn. They
+            # depend only on stored state, so waiting changes nothing except
+            # who is left to hear the answer: a caller that queues for
+            # minutes to be told its workdir was wrong has usually gone by
+            # then — a2a-post exits after a few seconds — and the refusal
+            # reaches nobody. run_turn checks again under the lock, which is
+            # the authoritative one; this only moves the failure forward.
+            self._pin_workdir(ctx_id, self.sessions.get(ctx_id), req_workdir)
+            async with lock:
                 reply, native = await self.run_turn(ctx_id, prompt,
                                                     req_workdir)
-                meta = {"agent": self.name, "native_session_id": native}
-            except Exception as err:
-                log(f"[{ctx_id!r}] FAILED: {err}")
-                reply = f"ERROR from {self.name} worker: {err}"
-                meta = {"agent": self.name, "error": True}
+            meta = {"agent": self.name, "native_session_id": native}
+        except Exception as err:
+            log(f"[{ctx_id!r}] FAILED: {err}")
+            reply = f"ERROR from {self.name} worker: {err}"
+            meta = {"agent": self.name, "error": True}
         msg = new_agent_text_message(reply, context_id=ctx_id,
                                      task_id=context.task_id)
         msg.metadata = meta
