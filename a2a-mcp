@@ -163,7 +163,11 @@ def do_send(agent: str, context: str, message: str,
 
 
 def _box(recipient: str) -> Path:
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", recipient):
+    # The name must carry a letter or digit. The character class alone also
+    # matches "." and "..", which are not names but traversal: `mail ..`
+    # would treat ~/.local/state/a2a-agents as a box and unlink every
+    # daemon's session map on its way past.
+    if not re.fullmatch(r"(?=.*[A-Za-z0-9])[A-Za-z0-9._-]{1,64}", recipient):
         raise ValueError(f"invalid recipient name {recipient!r}")
     # Explicit modes: posters may run under a permissive umask.
     for d in (MAILBOX_DIR, MAILBOX_DIR / recipient):
