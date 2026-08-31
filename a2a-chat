@@ -44,7 +44,7 @@ KEY_FILE = Path.home() / ".config/a2a-agents/api-key"
 
 
 def die(msg: str) -> None:
-    sys.exit(f"a2a-chat: {msg}")
+    sys.exit(f"{Path(sys.argv[0]).name or 'a2a-chat'}: {msg}")
 
 
 def load_conf() -> dict:
@@ -194,14 +194,24 @@ def repl(client: httpx.Client, agent: str, context_id: str,
             continue
         if line in ("/exit", "/quit", "exit", "quit"):
             return
-        if line.startswith("/workdir"):
-            arg = line.removeprefix("/workdir").strip()
+        # Dispatch on the whole first word: startswith() would read a typo
+        # like /workdirfoo as "/workdir foo" and act on it, deferring the
+        # surprise to a daemon refusal much later.
+        cmd, _, cmd_arg = line.partition(" ")
+        if line.startswith("/") and cmd not in ("/workdir", "/context",
+                                                "/new"):
+            print(f"\n[error] unknown command {cmd!r} "
+                  f"(commands: /context /workdir /new /exit; to send a "
+                  f"message that starts with '/', use the one-shot form)\n")
+            continue
+        if cmd == "/workdir":
+            arg = cmd_arg.strip()
             if arg:
                 workdir = str(Path(arg).expanduser().resolve())
             print(f"workdir: {workdir or '(unset)'}")
             continue
-        if line.startswith("/context"):
-            arg = line.removeprefix("/context").strip()
+        if cmd == "/context":
+            arg = cmd_arg.strip()
             if arg and "/" in arg:
                 # A REPL holds one daemon's connection, so an address for
                 # another agent cannot be honoured here — and taking it
