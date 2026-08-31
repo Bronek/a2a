@@ -35,6 +35,17 @@ supported; each runs as its own daemon, launched and observed separately.
   approval prompts in headless mode, the `a2a` server must be configured
   with `"trust": true` – either globally in `~/.gemini/settings.json`, or
   via a `.mcp.json` file in every project directory the agent visits.
+  The global form is one edit instead of a file per project:
+
+  ```json
+  "mcpServers": { "a2a": { "command": "a2a-mcp", "trust": true } }
+  ```
+
+  at the price of auto-approving the mesh tools in *every* directory
+  gemini runs in; the per-project `.mcp.json` form scopes the same grant
+  to the workspaces that carry it. Both are acceptable here because the
+  tools only reach the local mesh, and the receiving workers keep their
+  own permission gates – the boundary that actually matters.
   The same operations double as a CLI: `a2a-mcp list`,
   `a2a-mcp send <agent> <context> <message>`.
 - The **mailbox** – `post` / `check_mail` tools (CLI: `post`, `mail`,
