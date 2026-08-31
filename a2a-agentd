@@ -202,6 +202,7 @@ class CliAgentExecutor(AgentExecutor):
                     f".corrupt-{int(time.time())}")
                 self.state_file.rename(bad)
                 log(f"state file was corrupt; moved to {bad}, starting empty")
+        migrated = False
         for ctx, val in list(self.sessions.items()):
             if isinstance(val, str):  # legacy schema: bare native session id
                 wd = self.legacy_workdir
@@ -209,6 +210,11 @@ class CliAgentExecutor(AgentExecutor):
                     "session": val,
                     "workdir": str(Path(wd).expanduser()) if wd else None,
                 }
+                migrated = True
+        if migrated:
+            # Flush eagerly so the file on disk never misrepresents the
+            # schema the daemon is actually running with.
+            self.save_state()
         self.locks: dict[str, asyncio.Lock] = {}
 
     def save_state(self) -> None:
