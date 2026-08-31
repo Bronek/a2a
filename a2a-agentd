@@ -180,6 +180,36 @@ class CliAdapter:
         raise ValueError(f"unknown adapter kind: {self.kind}")
 
 
+    def error_hint(self, stdout: str) -> str:
+        """The reason a CLI failed is not always on stderr. codex reports a
+        usage limit as a JSON event on stdout and writes no stderr at all,
+        which left the daemon reporting `exited 1 after 5s: \'\'`. Mine the
+        structured output for the message before giving up on it."""
+        best = ""
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not (line.startswith("{") and line.endswith("}")):
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            msg = None
+            if ev.get("type") == "error":
+                msg = ev.get("message")
+            elif isinstance(ev.get("error"), dict):
+                msg = ev["error"].get("message")
+            elif isinstance(ev.get("error"), str):
+                msg = ev["error"]
+            elif ev.get("is_error") and isinstance(ev.get("result"), str):
+                msg = ev["result"]
+            if isinstance(msg, str) and msg.strip():
+                best = msg.strip()  # keep the last: the most specific
+        return best
+
+
 class CliAgentExecutor(AgentExecutor):
     def __init__(self, name: str, cfg: dict):
         self.name = name
@@ -378,7 +408,8 @@ class CliAgentExecutor(AgentExecutor):
             # startup before the agent does any work, so the retry cannot
             # repeat side effects of a partially-run turn.
             retry: bool | None = None
-            low = stderr.lower()
+            hint = self.adapter.error_hint(stdout) if rc != 0 else ""
+            low = f"{stderr} {hint}".lower()
             if (rc != 0 and not resume and not self.adapter.chooses_own_id()
                     and "already" in low and "session" in low):
                 retry = True
@@ -411,9 +442,16 @@ class CliAgentExecutor(AgentExecutor):
                                                         left, workdir)
             dt = time.monotonic() - t0
             if rc != 0:
+                detail = stderr.strip()
+                hint = self.adapter.error_hint(stdout)
+                if hint and hint not in detail:
+                    detail = f"{detail} {hint}".strip()
+                if not detail:
+                    # Neither stream said anything usable; the tail of stdout
+                    # beats reporting an empty string.
+                    detail = stdout.strip()[-300:] or "no output on either stream"
                 raise RuntimeError(
-                    f"{cmd[0]} exited {rc} after {dt:.0f}s: "
-                    f"{stderr.strip()[:500]!r}")
+                    f"{cmd[0]} exited {rc} after {dt:.0f}s: {detail[:500]!r}")
             try:
                 text, parsed_id = self.adapter.parse(stdout, lm.name)
             except Exception as err:
