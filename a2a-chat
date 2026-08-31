@@ -43,7 +43,7 @@ def client_for(port: int) -> httpx.Client:
     except FileNotFoundError:
         die(f"{KEY_FILE} not found — start a daemon once to create it")
     return httpx.Client(base_url=f"http://127.0.0.1:{port}",
-                        headers={"X-A2A-Key": key},
+                        headers={"X-API-Key": key},
                         timeout=httpx.Timeout(10, read=1800))
 
 

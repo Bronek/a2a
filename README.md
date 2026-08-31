@@ -61,7 +61,7 @@ race.
 
 ## Secrets and security
 
-- Ports bind to loopback only, and every request must carry an `X-A2A-Key`
+- Ports bind to loopback only, and every request must carry an `X-API-Key`
   header matching `~/.config/a2a-agents/api-key` (created on first start,
   mode 0600). Loopback alone is not a boundary on a multi-user machine.
   The one exception is agent-card discovery (`/.well-known/agent-card.json`,

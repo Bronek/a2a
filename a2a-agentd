@@ -12,7 +12,7 @@ Usage: a2a-agentd <agent-name>
 
 Agent names, ports and adapter kinds come from ~/.config/a2a-agents/agents.toml.
 Each daemon serves the A2A protocol on 127.0.0.1:<port>, guarded by a shared
-key (~/.config/a2a-agents/api-key, header X-A2A-Key) so other local users
+key (~/.config/a2a-agents/api-key, header X-API-Key) so other local users
 cannot drive the agents. A2A context ids map to native CLI session ids,
 persisted in ~/.local/state/a2a-agents/<agent>.json.
 """
@@ -244,7 +244,7 @@ class CliAgentExecutor(AgentExecutor):
 
 
 class KeyAuth:
-    """Minimal ASGI middleware: require X-A2A-Key on every HTTP request,
+    """Minimal ASGI middleware: require X-API-Key on every HTTP request,
     except agent-card discovery — A2A expects the card to be anonymously
     fetchable, with the required scheme declared inside the card."""
 
@@ -259,12 +259,12 @@ class KeyAuth:
                 scope.get("method") == "GET"
                 and scope.get("path") in self.OPEN_PATHS):
             headers = {k.lower(): v for k, v in scope.get("headers", [])}
-            if not secrets.compare_digest(headers.get(b"x-a2a-key", b""),
+            if not secrets.compare_digest(headers.get(b"x-api-key", b""),
                                           self.key):
                 await send({"type": "http.response.start", "status": 401,
                             "headers": [(b"content-type", b"text/plain")]})
                 await send({"type": "http.response.body",
-                            "body": b"missing or bad X-A2A-Key\n"})
+                            "body": b"missing or bad X-API-Key\n"})
                 return
         await self.app(scope, receive, send)
 
@@ -287,7 +287,7 @@ def main() -> None:
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         security_schemes={"apiKey": SecurityScheme.model_validate(
-            {"type": "apiKey", "name": "X-A2A-Key", "in": "header"})},
+            {"type": "apiKey", "name": "X-API-Key", "in": "header"})},
         security=[{"apiKey": []}],
         skills=[AgentSkill(
             id="chat", name="chat", tags=["cli", cfg["kind"]],
