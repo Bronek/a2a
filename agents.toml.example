@@ -6,9 +6,6 @@
 #   kind          adapter: "claude" | "gemini" | "codex" | "kimi"
 #   command       CLI binary to run
 #   port          loopback port for the A2A daemon
-#   workdir       LEGACY (migration only): state entries predating
-#                 per-context workdirs adopt it as their pin; new contexts
-#                 pin a workdir via message metadata on their first message
 #   trusted_workdirs  gemini only: directories (each trusting its whole
 #                 subtree) whose pinned contexts get --skip-trust
 #   timeout       seconds before a task is killed (default 1800)

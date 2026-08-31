@@ -223,10 +223,6 @@ class CliAgentExecutor(AgentExecutor):
         self.cfg = cfg
         self.adapter = CliAdapter(cfg["kind"], cfg.get("command", name),
                                   cfg.get("extra_args", []))
-        # `workdir` in config is legacy: it only supplies the pin for state
-        # entries that predate per-context workdirs. New contexts must pin
-        # theirs via message metadata on their first message.
-        self.legacy_workdir = cfg.get("workdir")
         # gemini only: each entry trusts that directory and its whole subtree.
         # Resolved, because the subtree test below is lexical: an unresolved
         # entry would both admit paths outside the tree and miss legitimate
@@ -239,6 +235,11 @@ class CliAgentExecutor(AgentExecutor):
             # gemini quietly stop trusting a workspace that used to work.
             log(f"{name}: trust_workspace is obsolete and ignored; list the "
                 f"directories to trust in trusted_workdirs instead")
+        if cfg.get("workdir") is not None:
+            # Same treatment: this key only fed the migration of state
+            # entries that predate per-context workdirs, which is gone.
+            log(f"{name}: workdir is obsolete and ignored; every context "
+                f"pins its own on its first message")
         self.timeout = cfg.get("timeout", 1800)
         self.state_file = STATE_DIR / f"{name}.json"
         self.sessions: dict[str, dict] = {}
@@ -270,31 +271,19 @@ class CliAgentExecutor(AgentExecutor):
                     log(f"state file was unusable ({err}) and could not be "
                         f"moved aside ({mv_err}); starting empty — the next "
                         f"save will overwrite it")
-        migrated, dropped = False, {}
+        dropped = {}
         for ctx, val in list(self.sessions.items()):
-            if isinstance(val, str):  # legacy schema: bare native session id
-                # Before per-context pinning every context ran in
-                # cfg["workdir"], which itself defaulted to ~. That default
-                # IS the directory these sessions were created in, so a
-                # config without an explicit workdir must migrate to ~ —
-                # migrating to None would discard a real pin, and the flush
-                # below would make the loss permanent.
-                wd = self.legacy_workdir or "~"
-                self.sessions[ctx] = {
-                    "session": val,
-                    "workdir": str(Path(wd).expanduser().resolve()),
-                }
-                migrated = True
-            elif not (isinstance(val, dict) and "session" in val
-                      and isinstance(val.get("session"), str | None)
-                      and isinstance(val.get("workdir"), str | None)):
-                # A wedge-shaped value — no dict, no "session" key, or
-                # fields of the wrong type ({"session": 42} would raise in
-                # _pin_workdir or exec argv on every turn, for ever, and
-                # only hand-editing the file brings the context back.
+            if not (isinstance(val, dict) and "session" in val
+                    and isinstance(val.get("session"), str | None)
+                    and isinstance(val.get("workdir"), str | None)):
+                # A wedge-shaped value — no dict (the bare-string schema
+                # from before per-context workdirs lands here too), no
+                # "session" key, or fields of the wrong type ({"session":
+                # 42} would raise in _pin_workdir or exec argv on every
+                # turn, for ever, and only hand-editing the file brings
+                # the context back.
                 dropped[ctx] = val
                 del self.sessions[ctx]
-                migrated = True
         if dropped:
             # Set the values aside rather than deleting them: the flush
             # below makes the drop durable at once, and a typo'd key may
@@ -308,9 +297,8 @@ class CliAgentExecutor(AgentExecutor):
             log(f"dropped {len(dropped)} malformed state "
                 f"entr{'y' if len(dropped) == 1 else 'ies'} "
                 f"({', '.join(map(repr, dropped))}); values kept in {aside}")
-        if migrated:
             # Flush eagerly so the file on disk never misrepresents the
-            # schema the daemon is actually running with.
+            # state the daemon is actually running with.
             self.save_state()
         self.locks: dict[str, asyncio.Lock] = {}
 

@@ -195,10 +195,7 @@ you meant; a relative path or a symlink therefore means the same directory
 later that it meant at the time. A different directory means a new context name.
 
 One daemon per agent thus serves conversations in any number of projects
-concurrently. Entries created before this scheme adopt the per-agent
-`workdir` from the configuration, which is otherwise legacy; where the
-configuration sets none they adopt `~`, which is where the pre-pinning
-daemon ran them.
+concurrently.
 
 ## Secrets and security
 
