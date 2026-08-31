@@ -180,11 +180,17 @@ class CliAdapter:
         raise ValueError(f"unknown adapter kind: {self.kind}")
 
 
-    def error_hint(self, stdout: str) -> str:
+    def error_hint(self, stdout: str, cli_only: bool = False) -> str:
         """The reason a CLI failed is not always on stderr. codex reports a
         usage limit as a JSON event on stdout and writes no stderr at all,
         which left the daemon reporting `exited 1 after 5s: \'\'`. Mine the
-        structured output for the message before giving up on it."""
+        structured output for the message before giving up on it.
+
+        `cli_only` drops the one branch that can carry model-authored text —
+        claude's is_error/result, where `result` is also the field the
+        model's own reply arrives in. Callers that merely display the
+        message want everything; callers that pattern-match it must not
+        match on something the model wrote."""
         best = ""
         for line in stdout.splitlines():
             line = line.strip()
@@ -203,7 +209,8 @@ class CliAdapter:
                 msg = ev["error"].get("message")
             elif isinstance(ev.get("error"), str):
                 msg = ev["error"]
-            elif ev.get("is_error") and isinstance(ev.get("result"), str):
+            elif (not cli_only and ev.get("is_error")
+                    and isinstance(ev.get("result"), str)):
                 msg = ev["result"]
             if isinstance(msg, str) and msg.strip():
                 best = msg.strip()  # keep the last: the most specific
@@ -408,7 +415,12 @@ class CliAgentExecutor(AgentExecutor):
             # startup before the agent does any work, so the retry cannot
             # repeat side effects of a partially-run turn.
             retry: bool | None = None
-            hint = self.adapter.error_hint(stdout) if rc != 0 else ""
+            # cli_only: this text decides whether to abandon a session, so
+            # it must come from the CLI's own error fields. Model output is
+            # not evidence about the session — a turn that merely quotes
+            # "no conversation found" would otherwise orphan a healthy one.
+            hint = (self.adapter.error_hint(stdout, cli_only=True)
+                    if rc != 0 else "")
             low = f"{stderr} {hint}".lower()
             if (rc != 0 and not resume and not self.adapter.chooses_own_id()
                     and "already" in low and "session" in low):
