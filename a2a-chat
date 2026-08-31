@@ -1,0 +1,184 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx>=0.27"]
+# ///
+"""REPL / one-shot client for the local A2A agent daemons.
+
+Usage:
+  a2a-chat [agent]                  interactive REPL (default agent: claude)
+  a2a-chat [agent] --send "msg"     one-shot, prints the reply and exits
+  a2a-chat --status                 show which daemons are up
+  a2a-chat [agent] --context ID     use a chosen A2A context id (any string);
+                                    the daemon maps it to a native CLI session
+
+REPL commands: /context [id]  show or switch context
+               /new           start a fresh context
+               /exit
+"""
+import argparse
+import json
+import sys
+import tomllib
+import uuid
+from pathlib import Path
+
+import httpx
+
+CONFIG_FILE = Path.home() / ".config/a2a-agents/agents.toml"
+KEY_FILE = Path.home() / ".config/a2a-agents/api-key"
+
+
+def die(msg: str) -> None:
+    sys.exit(f"a2a-chat: {msg}")
+
+
+def load_conf() -> dict:
+    return tomllib.loads(CONFIG_FILE.read_text())
+
+
+def client_for(port: int) -> httpx.Client:
+    try:
+        key = KEY_FILE.read_text().strip()
+    except FileNotFoundError:
+        die(f"{KEY_FILE} not found — start a daemon once to create it")
+    return httpx.Client(base_url=f"http://127.0.0.1:{port}",
+                        headers={"X-A2A-Key": key},
+                        timeout=httpx.Timeout(10, read=1800))
+
+
+def show_status(conf: dict) -> None:
+    for name, cfg in conf.items():
+        if not isinstance(cfg, dict) or "port" not in cfg:
+            continue
+        with client_for(cfg["port"]) as c:
+            state = "DOWN"
+            for path in ("/.well-known/agent-card.json",
+                         "/.well-known/agent.json"):
+                try:
+                    r = c.get(path, timeout=3)
+                    if r.status_code == 200:
+                        state = f"up ({r.json().get('name')})"
+                        break
+                    state = f"HTTP {r.status_code}"
+                except httpx.TransportError:
+                    pass
+        print(f"{name:>8}  port {cfg['port']}  {state}")
+
+
+def extract_text(result: dict) -> tuple[str, dict]:
+    """Pull reply text + metadata out of an A2A Message or Task result."""
+    if result.get("kind") == "message":
+        parts = result.get("parts", [])
+        text = "\n".join(p.get("text", "") for p in parts
+                         if p.get("kind") == "text")
+        return text, result.get("metadata") or {}
+    if result.get("kind") == "task":
+        chunks, meta = [], {}
+        for art in result.get("artifacts") or []:
+            for p in art.get("parts", []):
+                if p.get("kind") == "text":
+                    chunks.append(p.get("text", ""))
+        for m in reversed(result.get("history") or []):
+            if m.get("role") == "agent":
+                meta = m.get("metadata") or {}
+                if not chunks:
+                    chunks = [p.get("text", "") for p in m.get("parts", [])
+                              if p.get("kind") == "text"]
+                break
+        return "\n".join(chunks), meta
+    return json.dumps(result, indent=2), {}
+
+
+def send(client: httpx.Client, context_id: str, text: str) -> tuple[str, dict]:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "message/send",
+        "params": {"message": {
+            "kind": "message",
+            "role": "user",
+            "messageId": str(uuid.uuid4()),
+            "contextId": context_id,
+            "parts": [{"kind": "text", "text": text}],
+        }},
+    }
+    r = client.post("/", json=payload)
+    r.raise_for_status()
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(f"A2A error {data['error'].get('code')}: "
+                           f"{data['error'].get('message')}")
+    return extract_text(data["result"])
+
+
+def repl(client: httpx.Client, agent: str, context_id: str) -> None:
+    try:
+        import readline  # noqa: F401  (line editing / history)
+    except ImportError:
+        pass
+    print(f"--- {agent} | context {context_id} | /exit to quit ---")
+    last_native = None
+    while True:
+        try:
+            line = input(f"[{agent}] > ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+        if not line:
+            continue
+        if line in ("/exit", "/quit", "exit", "quit"):
+            return
+        if line.startswith("/context"):
+            arg = line.removeprefix("/context").strip()
+            if arg:
+                context_id, last_native = arg, None
+            print(f"context: {context_id}")
+            continue
+        if line == "/new":
+            context_id, last_native = str(uuid.uuid4()), None
+            print(f"context: {context_id}")
+            continue
+        try:
+            text, meta = send(client, context_id, line)
+        except Exception as err:
+            print(f"\n[error] {err}\n")
+            continue
+        native = meta.get("native_session_id")
+        if native and native != last_native:
+            print(f"(native {agent} session: {native})")
+            last_native = native
+        print(f"\n{text}\n")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("agent", nargs="?", default="claude")
+    ap.add_argument("--context", help="A2A context id to use / resume")
+    ap.add_argument("--send", metavar="MSG", help="one-shot message, then exit")
+    ap.add_argument("--status", action="store_true",
+                    help="show daemon status for all configured agents")
+    args = ap.parse_args()
+
+    conf = load_conf()
+    if args.status:
+        show_status(conf)
+        return
+    if args.agent not in conf:
+        die(f"unknown agent {args.agent!r} (one of: {', '.join(conf)})")
+
+    context_id = args.context or str(uuid.uuid4())
+    with client_for(conf[args.agent]["port"]) as client:
+        if args.send:
+            text, meta = send(client, context_id, args.send)
+            native = meta.get("native_session_id")
+            if native:
+                print(f"(context {context_id} -> native session {native})",
+                      file=sys.stderr)
+            print(text)
+        else:
+            repl(client, args.agent, context_id)
+
+
+if __name__ == "__main__":
+    main()

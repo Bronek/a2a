@@ -1,0 +1,298 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "a2a-sdk[http-server]>=0.3,<0.4",
+#   "uvicorn>=0.30",
+# ]
+# ///
+"""A2A daemon wrapping a local agent CLI (claude / gemini / codex / kimi).
+
+Usage: a2a-agentd <agent-name>
+
+Agent names, ports and adapter kinds come from ~/.config/a2a-agents/agents.toml.
+Each daemon serves the A2A protocol on 127.0.0.1:<port>, guarded by a shared
+key (~/.config/a2a-agents/api-key, header X-A2A-Key) so other local users
+cannot drive the agents. A2A context ids map to native CLI session ids,
+persisted in ~/.local/state/a2a-agents/<agent>.json.
+"""
+import asyncio
+import json
+import os
+import secrets
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+import uuid
+from pathlib import Path
+
+import uvicorn
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.events import EventQueue
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+from a2a.utils import new_agent_text_message
+
+CONFIG_FILE = Path.home() / ".config/a2a-agents/agents.toml"
+KEY_FILE = Path.home() / ".config/a2a-agents/api-key"
+STATE_DIR = Path.home() / ".local/state/a2a-agents"
+
+
+def log(msg: str) -> None:
+    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+
+def load_or_create_key() -> str:
+    try:
+        fd = os.open(KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return KEY_FILE.read_text().strip()
+    with os.fdopen(fd, "w") as f:
+        key = secrets.token_hex(32)
+        f.write(key + "\n")
+    return key
+
+
+def resolve_pass_env(mapping: dict[str, str]) -> dict[str, str]:
+    """Fetch secrets from pass(1). Needs gpg-agent to have the passphrase
+    cached (run any `pass show` in your own shell to prime it)."""
+    env = {}
+    for var, entry in mapping.items():
+        res = subprocess.run(["pass", "show", entry],
+                             capture_output=True, text=True, timeout=30)
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"pass show {entry} failed: {res.stderr.strip() or 'no output'}")
+        secret = res.stdout.splitlines()[0].strip() if res.stdout else ""
+        if not secret:
+            raise RuntimeError(f"pass entry {entry} is empty")
+        env[var] = secret
+    return env
+
+
+class CliAdapter:
+    """Build argv and parse output for one CLI flavour."""
+
+    def __init__(self, kind: str, command: str, extra_args: list[str]):
+        self.kind = kind
+        self.command = command
+        self.extra = extra_args
+
+    def chooses_own_id(self) -> bool:
+        # claude and gemini accept a caller-chosen --session-id;
+        # codex and kimi mint their own, discovered from output.
+        return self.kind in ("codex", "kimi")
+
+    def build(self, prompt: str, native_id: str | None, resume: bool,
+              lastmsg: str) -> list[str]:
+        c = self.command
+        if self.kind == "claude":
+            sel = ["--resume", native_id] if resume else ["--session-id", native_id]
+            return [c, "-p", "--output-format", "json", *sel, *self.extra, prompt]
+        if self.kind == "gemini":
+            sel = ["--resume", native_id] if resume else ["--session-id", native_id]
+            # --skip-trust: headless runs refuse untrusted workspaces otherwise
+            return [c, "-o", "json", "--skip-trust", *sel, *self.extra,
+                    "-p", prompt]
+        if self.kind == "codex":
+            common = ["--json", "--skip-git-repo-check",
+                      "--output-last-message", lastmsg, *self.extra]
+            if resume:
+                return [c, "exec", "resume", *common, native_id, prompt]
+            return [c, "exec", *common, prompt]
+        if self.kind == "kimi":
+            # kimi's own session.resume_hint says `kimi -r <id>`
+            sel = ["-r", native_id] if resume else []
+            return [c, *sel, "--output-format", "stream-json", *self.extra,
+                    "-p", prompt]
+        raise ValueError(f"unknown adapter kind: {self.kind}")
+
+    def parse(self, stdout: str, lastmsg: str) -> tuple[str, str | None]:
+        """Return (reply_text, native_session_id or None if unchanged)."""
+        if self.kind == "claude":
+            j = json.loads(stdout)
+            return j.get("result", ""), j.get("session_id")
+        if self.kind == "gemini":
+            j = json.loads(stdout)
+            text = j.get("response") or j.get("result") or ""
+            sid = j.get("sessionId") or (j.get("stats") or {}).get("sessionId")
+            return text, sid
+        if self.kind == "codex":
+            sid, texts = None, []
+            for line in stdout.splitlines():
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                sid = (sid or ev.get("thread_id") or ev.get("session_id")
+                       or (ev.get("msg") or {}).get("session_id"))
+                item = ev.get("item") or {}
+                if item.get("type") == "agent_message":
+                    texts.append(item.get("text", ""))
+                if (ev.get("msg") or {}).get("type") == "agent_message":
+                    texts.append(ev["msg"].get("message", ""))
+            text = ""
+            if lastmsg and os.path.exists(lastmsg):
+                text = Path(lastmsg).read_text().strip()
+            return text or "\n".join(texts), sid
+        if self.kind == "kimi":
+            # Events look like {"role":"assistant","content":"..."} and
+            # {"role":"meta","type":"session.resume_hint","session_id":"..."}
+            sid, texts = None, []
+            for line in stdout.splitlines():
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                sid = sid or ev.get("session_id")
+                if ev.get("role") == "assistant" and isinstance(
+                        ev.get("content"), str):
+                    texts.append(ev["content"])
+            return "\n".join(texts), sid
+        raise ValueError(f"unknown adapter kind: {self.kind}")
+
+
+class CliAgentExecutor(AgentExecutor):
+    def __init__(self, name: str, cfg: dict):
+        self.name = name
+        self.cfg = cfg
+        self.adapter = CliAdapter(cfg["kind"], cfg.get("command", name),
+                                  cfg.get("extra_args", []))
+        self.workdir = Path(cfg.get("workdir", "~")).expanduser()
+        self.timeout = cfg.get("timeout", 1800)
+        self.state_file = STATE_DIR / f"{name}.json"
+        self.sessions: dict[str, str] = {}
+        if self.state_file.exists():
+            self.sessions = json.loads(self.state_file.read_text())
+        self.locks: dict[str, asyncio.Lock] = {}
+
+    def save_state(self) -> None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.sessions, indent=1))
+        tmp.rename(self.state_file)
+
+    async def execute(self, context: RequestContext,
+                      event_queue: EventQueue) -> None:
+        prompt = context.get_user_input()
+        ctx_id = context.context_id
+        lock = self.locks.setdefault(ctx_id, asyncio.Lock())
+        async with lock:
+            try:
+                reply, native = await self.run_turn(ctx_id, prompt)
+                meta = {"agent": self.name, "native_session_id": native}
+            except Exception as err:
+                log(f"[{ctx_id}] FAILED: {err}")
+                reply = f"ERROR from {self.name} worker: {err}"
+                meta = {"agent": self.name, "error": True}
+        msg = new_agent_text_message(reply, context_id=ctx_id,
+                                     task_id=context.task_id)
+        msg.metadata = meta
+        await event_queue.enqueue_event(msg)
+
+    async def run_turn(self, ctx_id: str, prompt: str) -> tuple[str, str]:
+        native = self.sessions.get(ctx_id)
+        resume = native is not None
+        if not resume and not self.adapter.chooses_own_id():
+            # Deterministic native id so the same context always maps to the
+            # same CLI session, even if state is lost.
+            native = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                    f"a2a://{self.name}/{ctx_id}"))
+
+        env = os.environ.copy()
+        if self.cfg.get("env_from_pass"):
+            env.update(resolve_pass_env(self.cfg["env_from_pass"]))
+
+        with tempfile.NamedTemporaryFile(mode="r", suffix=".txt") as lm:
+            cmd = self.adapter.build(prompt, native, resume, lm.name)
+            log(f"[{ctx_id}] {'resume' if resume else 'new'} "
+                f"native={native or '(cli-chosen)'} prompt={prompt[:60]!r}")
+            t0 = time.monotonic()
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=self.workdir, env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise RuntimeError(f"timed out after {self.timeout}s")
+            dt = time.monotonic() - t0
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"{cmd[0]} exited {proc.returncode} after {dt:.0f}s: "
+                    f"{stderr.decode(errors='replace').strip()[:500]}")
+            text, parsed_id = self.adapter.parse(stdout.decode(errors="replace"),
+                                                 lm.name)
+        native = parsed_id or native
+        if not native:
+            raise RuntimeError("could not determine native session id from output")
+        if self.sessions.get(ctx_id) != native:
+            self.sessions[ctx_id] = native
+            self.save_state()
+        log(f"[{ctx_id}] done in {dt:.0f}s native={native} reply={len(text)}ch")
+        return text, native
+
+    async def cancel(self, context: RequestContext,
+                     event_queue: EventQueue) -> None:
+        raise RuntimeError("cancel is not supported")
+
+
+class KeyAuth:
+    """Minimal ASGI middleware: require X-A2A-Key on every HTTP request."""
+
+    def __init__(self, app, key: str):
+        self.app = app
+        self.key = key.encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = {k.lower(): v for k, v in scope.get("headers", [])}
+            if not secrets.compare_digest(headers.get(b"x-a2a-key", b""),
+                                          self.key):
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body",
+                            "body": b"missing or bad X-A2A-Key\n"})
+                return
+        await self.app(scope, receive, send)
+
+
+def main() -> None:
+    conf = tomllib.loads(CONFIG_FILE.read_text())
+    if len(sys.argv) != 2 or sys.argv[1] not in conf:
+        sys.exit(f"usage: a2a-agentd <agent>   (one of: {', '.join(conf)})")
+    name = sys.argv[1]
+    cfg = conf[name]
+    port = cfg["port"]
+
+    card = AgentCard(
+        name=f"{name}-worker",
+        description=f"Local A2A wrapper around the `{cfg.get('command', name)}` "
+                    f"CLI (adapter: {cfg['kind']})",
+        url=f"http://127.0.0.1:{port}",
+        version="1.0.0",
+        capabilities=AgentCapabilities(streaming=False),
+        default_input_modes=["text/plain"],
+        default_output_modes=["text/plain"],
+        skills=[AgentSkill(
+            id="chat", name="chat", tags=["cli", cfg["kind"]],
+            description="Send a prompt; the wrapped CLI agent replies. "
+                        "Reuse contextId to continue a conversation.")],
+    )
+    handler = DefaultRequestHandler(
+        agent_executor=CliAgentExecutor(name, cfg),
+        task_store=InMemoryTaskStore())
+    app = A2AStarletteApplication(agent_card=card, http_handler=handler).build()
+    log(f"{name}-worker listening on 127.0.0.1:{port}")
+    uvicorn.run(KeyAuth(app, load_or_create_key()),
+                host="127.0.0.1", port=port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+[Unit]
+Description=A2A agent daemon (%i)
+# Shared home: the A2A agent mesh runs only on gdansk.
+ConditionHost=gdansk*
+After=network.target
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p %h/.local/state/a2a-agents
+ExecStart=%h/.local/bin/a2a-agentd %i
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# This user cannot read the systemd journal on gdansk, so log to files:
+#   tail -f ~/.local/state/a2a-agents/<agent>.log
+StandardOutput=append:%h/.local/state/a2a-agents/%i.log
+StandardError=append:%h/.local/state/a2a-agents/%i.log
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

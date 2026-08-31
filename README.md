@@ -1,0 +1,82 @@
+# a2a – a local mesh of agent CLIs
+
+Agent CLI tools from different labs, wrapped as [A2A](https://a2a-protocol.org)
+servers on loopback ports, so that they can be driven uniformly – by a human at
+a REPL, or by one another. The point of mixing labs is divergence: models with
+different training do not share blind spots, which makes their agreement worth
+more and their disagreement informative. Claude, Gemini, Codex and Kimi are
+supported; each runs as its own daemon, launched and observed separately.
+
+## Components
+
+- `a2a-agentd <agent>` – daemon wrapping one CLI. A self-contained
+  [uv](https://docs.astral.sh/uv/) script (PEP 723 inline dependencies, no
+  virtualenv to manage) serving the A2A protocol – JSON-RPC `message/send` –
+  on `127.0.0.1:<port>`, with the real work delegated to the CLI in
+  non-interactive mode.
+- `a2a-chat [agent]` – REPL and one-shot client. `--status` shows which
+  daemons are up, `--send` makes it scriptable, `--context` picks the
+  conversation to continue.
+- `a2a-agent@.service` – systemd user template unit; one instance per agent
+  (`systemctl --user start a2a-agent@claude`). NB the unit carries a
+  `ConditionHost=` so that a home directory shared between hosts does not
+  start daemons where they are not wanted – adjust it to the host that should
+  run the mesh.
+- `agents.toml.example` – seed for `~/.config/a2a-agents/agents.toml`: which
+  CLI, which port, which adapter kind, plus per-agent extras.
+
+## Install
+
+```
+make install
+```
+
+copies the scripts to `~/.local/bin`, installs the unit, and creates
+`~/.config/a2a-agents/agents.toml` from the example – only if it does not
+exist yet; an existing configuration is never touched. The first daemon start
+resolves the Python dependencies (network needed once) and generates the
+shared API key.
+
+## Usage
+
+```
+systemctl --user start a2a-agent@{claude,gemini,codex,kimi}
+a2a-chat --status
+a2a-chat kimi                                  # REPL: /context, /new, /exit
+a2a-chat codex --context review-42 --send "…"  # one-shot
+tail -f ~/.local/state/a2a-agents/claude.log   # progress of one agent
+```
+
+## Sessions
+
+Every A2A `contextId` maps to a native CLI session, so a conversation survives
+daemon restarts and can also be opened directly in the CLI that owns it
+(`claude --resume <id>`, `kimi -r <id>`, and so on – the client prints the
+native id). Claude and Gemini accept a caller-chosen session UUID, derived
+deterministically from the context id; Codex and Kimi mint their own, which
+the daemon captures from their JSON output. The mapping is persisted in
+`~/.local/state/a2a-agents/<agent>.json`, and turns within one context are
+serialised – concurrent requests to the same conversation queue rather than
+race.
+
+## Secrets and security
+
+- Ports bind to loopback only, and every request must carry an `X-A2A-Key`
+  header matching `~/.config/a2a-agents/api-key` (created on first start,
+  mode 0600). Loopback alone is not a boundary on a multi-user machine.
+- An agent may be given secrets through `env_from_pass`: each entry is
+  resolved with `pass show` per task and injected into that agent's
+  subprocess only – no other agent sees it, nothing is stored or logged.
+  This requires the gpg-agent passphrase cache to be primed (any `pass show`
+  in an interactive shell does it).
+- Agents run in their CLIs' default permission modes, which is deliberately
+  conservative; grant more through `extra_args` per agent, and only as much
+  as the workload needs.
+
+## Limitations
+
+Responses are single-shot – no streaming, no incremental task updates – and
+`tasks/cancel` is not implemented; a slow turn simply runs until it finishes
+or hits the per-agent timeout. Log files under `~/.local/state/a2a-agents/`
+grow without rotation, though at a line or two per task this takes a while to
+matter.

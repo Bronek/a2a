@@ -1,0 +1,40 @@
+# Agent definitions for a2a-agentd / a2a-chat.
+# Copied to ~/.config/a2a-agents/agents.toml by `make install` when that file
+# does not exist yet; edit the copy, not this example.
+#
+# Per-agent keys:
+#   kind          adapter: "claude" | "gemini" | "codex" | "kimi"
+#   command       CLI binary to run
+#   port          loopback port for the A2A daemon
+#   workdir       working directory for the CLI (default "~")
+#   timeout       seconds before a task is killed (default 1800)
+#   extra_args    appended to every invocation, e.g. permission/approval modes
+#   env_from_pass VAR = "pass entry" — resolved with pass(1) per task, only for
+#                 this agent's subprocess, never stored or logged
+
+[claude]
+kind = "claude"
+command = "claude"
+port = 8002
+# env_from_pass = { GH_TOKEN = "path/to/entry/in/pass" }
+# extra_args = ["--permission-mode", "acceptEdits"]
+extra_args = []
+
+[gemini]
+kind = "gemini"
+command = "gemini"
+port = 8003
+# extra_args = ["--approval-mode", "auto_edit"]
+extra_args = []
+
+[codex]
+kind = "codex"
+command = "codex"
+port = 8001
+extra_args = []
+
+[kimi]
+kind = "kimi"
+command = "kimi"
+port = 8004
+extra_args = []
