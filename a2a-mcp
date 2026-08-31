@@ -53,6 +53,7 @@ MAILBOX_DIR = Path.home() / ".local/state/a2a-agents/mailbox"
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_BOX_MESSAGES = 2000
 STALE_TMP_SECONDS = 3600
+STALE_BAD_SECONDS = 7 * 24 * 3600
 
 
 def load_conf() -> dict:
@@ -200,14 +201,17 @@ def do_post(recipient: str, message: str, sender: str | None = None) -> str:
             f"message is {size} bytes, over the {MAX_MESSAGE_BYTES}-byte "
             f"limit for one post — post a summary and leave the bulk in a "
             f"file the reader can open")
-    # Reap what interrupted posts left behind. Drains skip dotfiles, so
-    # nothing else ever removes these.
-    for stale in box.glob(".*.tmp"):
-        try:
-            if stale.stat().st_mtime < time.time() - STALE_TMP_SECONDS:
-                stale.unlink()
-        except OSError:
-            pass
+    # Reap what interrupted posts and quarantined entries left behind.
+    # Drains skip dotfiles, so nothing else ever removes either kind; the
+    # quarantine gets a week in case someone wants to look at it.
+    for pattern, ttl in ((".*.tmp", STALE_TMP_SECONDS),
+                         (".bad-*", STALE_BAD_SECONDS)):
+        for stale in box.glob(pattern):
+            try:
+                if stale.stat().st_mtime < time.time() - ttl:
+                    stale.unlink()
+            except OSError:
+                pass
     held = sum(1 for p in box.iterdir()
                if p.suffix == ".json" and not p.name.startswith("."))
     if held >= MAX_BOX_MESSAGES:
@@ -267,7 +271,7 @@ def do_check(recipient: str, wait: bool = False,
         if deliver is not None:
             deliver(empty)
         return empty
-    out, drained = [], []
+    out, drained, unreadable = [], [], []
     for p in files:
         try:
             m = json.loads(p.read_text())
@@ -276,28 +280,31 @@ def do_check(recipient: str, wait: bool = False,
         except FileNotFoundError:
             continue  # a concurrent drain won this one
         except (ValueError, OSError) as err:
-            # Quarantine rather than raise. An entry that cannot be read
-            # must not strand the messages already collected, and must not
-            # stay in the box wedging every future drain.
-            bad = p.with_name(f".bad-{p.name}")
-            try:
-                p.rename(bad)
-            except OSError:
-                pass
-            out.append(f"[?] from ?:\n[unreadable entry quarantined as "
-                       f"{bad.name}: {err}]")
+            # Note it, deliver everything else, and only quarantine below,
+            # in the same commit phase as the unlinks. The note claims no
+            # rename: if the rename later fails the entry simply stays and
+            # is reported again next drain, which is honest twice over.
+            unreadable.append(p)
+            out.append(f"[?] from ?:\n[unreadable entry {p.name}: {err}]")
             continue
         out.append(f"[{m.get('ts', '?')}] from {m.get('from', '?')}:\n"
                    f"{m.get('text', '')}")
         drained.append(p)
     text = "\n\n---\n\n".join(out) or f"no mail for {recipient}"
-    # Hand the batch over before destroying it: unlinking first loses the
-    # mail outright if delivery then fails, and `mail lead | head` closing
-    # the pipe is enough to make it fail.
+    # Hand the batch over before destroying any of it: unlinking or
+    # renaming first loses mail — or the notes about it — outright if
+    # delivery then fails, and `mail lead | head` closing the pipe is
+    # enough to make it fail.
     if deliver is not None:
         deliver(text)
     for p in drained:
         p.unlink(missing_ok=True)
+    for p in unreadable:
+        # Dot-prefixed, so drains skip it; do_post's sweep reaps it later.
+        try:
+            p.rename(p.with_name(f".bad-{p.name}"))
+        except OSError:
+            pass
     return text
 
 
@@ -381,10 +388,23 @@ if __name__ == "__main__":
     try:
         main()
     except BrokenPipeError:
-        # The consumer closed the pipe (`a2a-mcp mail lead | head`). The
-        # batch never landed, so do_check deliberately left the mail in the
-        # box; report that on stderr, and point stdout at /dev/null so the
-        # interpreter's shutdown flush does not raise a second time.
+        # The consumer closed the pipe (`… | head`). Point stdout at
+        # /dev/null so the interpreter's shutdown flush does not raise a
+        # second time, and say what the cut actually cost: for mail/watch
+        # the batch never landed so do_check left it in the box; a send's
+        # reply was already received, so the turn completed and only the
+        # local display was truncated.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        sys.exit("a2a-mcp: output cut off by the consumer — "
-                 "mail left in the box")
+        verb = sys.argv[1] if len(sys.argv) > 1 else ""
+        if verb in ("mail", "watch"):
+            sys.exit("a2a-mcp: output cut off by the consumer — "
+                     "mail left in the box")
+        if verb == "send":
+            sys.exit("a2a-mcp: output cut off by the consumer — the turn "
+                     "completed server-side; only the displayed reply was "
+                     "truncated")
+        sys.exit("a2a-mcp: output cut off by the consumer")
+    except ValueError as err:
+        # Bad recipient names and a NaN timeout are usage errors; they
+        # deserve the usage treatment, not a traceback.
+        sys.exit(f"a2a-mcp: {err}")
