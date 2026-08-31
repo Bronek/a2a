@@ -117,11 +117,16 @@ class CliAdapter:
             trust = ["--skip-trust"] if trusted else []
             return [c, "-o", "json", *trust, *sel, *self.extra, "-p", ""], prompt
         if self.kind == "codex":
+            # extra_args go before the subcommand: `codex exec resume` takes a
+            # narrower flag set than `codex exec` (no --approve-for-me, -m, -s
+            # …), so appending them makes every resumed turn exit 2. The
+            # global position parses for both.
             common = ["--json", "--skip-git-repo-check",
-                      "--output-last-message", lastmsg, *self.extra]
+                      "--output-last-message", lastmsg]
             if resume:
-                return [c, "exec", "resume", *common, native_id, "-"], prompt
-            return [c, "exec", *common, "-"], prompt
+                return [c, *self.extra, "exec", "resume",
+                        *common, native_id, "-"], prompt
+            return [c, *self.extra, "exec", *common, "-"], prompt
         if self.kind == "kimi":
             # kimi's own session.resume_hint says `kimi -r <id>`; it has no
             # stdin prompt mode, so its prompt remains visible in argv
