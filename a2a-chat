@@ -199,6 +199,22 @@ def repl(client: httpx.Client, agent: str, context_id: str,
             continue
         if line.startswith("/context"):
             arg = line.removeprefix("/context").strip()
+            if arg and "/" in arg:
+                # A REPL holds one daemon's connection, so an address for
+                # another agent cannot be honoured here — and taking it
+                # verbatim would create a context literally named
+                # "kimi/slice-a" on THIS agent, which is the misroute the
+                # address form exists to prevent.
+                head, _, tail = arg.partition("/")
+                if head != agent:
+                    print(f"\n[error] {arg!r} addresses {head!r}, but this "
+                          f"REPL is connected to {agent!r} — run "
+                          f"`a2a-chat --context {arg}` instead\n")
+                    continue
+                if not tail:
+                    print(f"\n[error] nothing after {head!r}/\n")
+                    continue
+                arg = tail
             if arg:
                 # An existing conversation already carries its own pin, and
                 # offering ours could only trip the mismatch refusal. Use
