@@ -24,8 +24,25 @@ supported; each runs as its own daemon, launched and observed separately.
   `.mcp.json` registers it for Claude Code sessions in this directory
   (it resolves via `PATH`, so run `make install` first), and the
   `a2a-review` project skill teaches the review choreography on top.
+  For kimi the registration lives in `~/.kimi-code/mcp.json` instead –
+  user level, so it loads in any workdir without the workspace-trust
+  prompt a project-level `.kimi-code/mcp.json` would require – plus an
+  `allow` rule for `mcp__a2a__*` in `~/.kimi-code/config.toml`, because
+  headless `kimi -p` (as run by `a2a-agent@kimi`) cannot answer
+  approval prompts.
   The same operations double as a CLI: `a2a-mcp list`,
   `a2a-mcp send <agent> <context> <message>`.
+- The **mailbox** – `post` / `check_mail` tools (CLI: `post`, `mail`,
+  `watch`) – gives the mesh an asynchronous edge: a worker deep in a long
+  task posts findings to a named box (conventionally `lead`) as they
+  emerge, instead of saving everything for one final reply; a live session
+  runs `a2a-mcp watch lead` in the background as a doorbell that wakes it
+  when mail lands. Boxes are 0700 directories under
+  `~/.local/state/a2a-agents/mailbox/`; delivery is one-way,
+  at-least-once, no read receipts – reports, not handshakes – and mail is
+  untrusted content from other agents, to be read as data. Workers
+  self-identify their posts via `A2A_AGENT`/`A2A_CONTEXT`, which the
+  daemon exports to every CLI subprocess.
 - `a2a-agent@.service` – systemd user template unit; one instance per agent
   (`systemctl --user start a2a-agent@claude`). NB the unit carries a
   `ConditionHost=` so that a home directory shared between hosts does not
