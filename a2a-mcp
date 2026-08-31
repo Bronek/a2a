@@ -1,0 +1,158 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "httpx>=0.27",
+#   "mcp>=2",
+# ]
+# ///
+"""MCP bridge to the local A2A agent mesh.
+
+Run with no arguments it is an MCP stdio server exposing the mesh as tools
+(register with e.g. `claude mcp add a2a -- a2a-mcp`, or via .mcp.json). The
+same operations are available from the command line, for testing and for
+agents that have shell access but no MCP client:
+
+  a2a-mcp list
+  a2a-mcp send <agent> <context> <message>
+
+Configuration (~/.config/a2a-agents/agents.toml) and the API key are shared
+with a2a-agentd / a2a-chat.
+"""
+import sys
+import tomllib
+import uuid
+from pathlib import Path
+
+import httpx
+
+CONFIG_FILE = Path.home() / ".config/a2a-agents/agents.toml"
+KEY_FILE = Path.home() / ".config/a2a-agents/api-key"
+
+
+def load_conf() -> dict:
+    conf = tomllib.loads(CONFIG_FILE.read_text())
+    return {n: c for n, c in conf.items()
+            if isinstance(c, dict) and "port" in c}
+
+
+def client_for(port: int) -> httpx.Client:
+    key = KEY_FILE.read_text().strip()
+    return httpx.Client(base_url=f"http://127.0.0.1:{port}",
+                        headers={"X-API-Key": key},
+                        timeout=httpx.Timeout(10, read=1800))
+
+
+def extract_text(result: dict) -> tuple[str, dict]:
+    """Pull reply text + metadata out of an A2A Message or Task result."""
+    if result.get("kind") == "message":
+        parts = result.get("parts", [])
+        text = "\n".join(p.get("text", "") for p in parts
+                         if p.get("kind") == "text")
+        return text, result.get("metadata") or {}
+    if result.get("kind") == "task":
+        chunks, meta = [], {}
+        for art in result.get("artifacts") or []:
+            for p in art.get("parts", []):
+                if p.get("kind") == "text":
+                    chunks.append(p.get("text", ""))
+        for m in reversed(result.get("history") or []):
+            if m.get("role") == "agent":
+                meta = m.get("metadata") or {}
+                if not chunks:
+                    chunks = [p.get("text", "") for p in m.get("parts", [])
+                              if p.get("kind") == "text"]
+                break
+        return "\n".join(chunks), meta
+    return str(result), {}
+
+
+def do_list() -> str:
+    lines = []
+    for name, cfg in load_conf().items():
+        state = "DOWN"
+        try:
+            with client_for(cfg["port"]) as c:
+                r = c.get("/.well-known/agent-card.json", timeout=3)
+                if r.status_code == 200:
+                    state = f"up — {r.json().get('description', '')}"
+                else:
+                    state = f"HTTP {r.status_code}"
+        except httpx.TransportError:
+            pass
+        lines.append(f"{name} (port {cfg['port']}): {state}")
+    return "\n".join(lines)
+
+
+def do_send(agent: str, context: str, message: str) -> str:
+    conf = load_conf()
+    if agent not in conf:
+        return f"ERROR: unknown agent {agent!r} (one of: {', '.join(conf)})"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "message/send",
+        "params": {"message": {
+            "kind": "message",
+            "role": "user",
+            "messageId": str(uuid.uuid4()),
+            "contextId": context,
+            "parts": [{"kind": "text", "text": message}],
+        }},
+    }
+    try:
+        with client_for(conf[agent]["port"]) as c:
+            r = c.post("/", json=payload)
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPError as err:
+        return f"ERROR: {agent} daemon unreachable or failed: {err}"
+    if "error" in data:
+        return (f"ERROR: A2A {data['error'].get('code')}: "
+                f"{data['error'].get('message')}")
+    text, meta = extract_text(data["result"])
+    native = meta.get("native_session_id")
+    tail = f"\n\n[{agent} / context {context}" \
+           + (f" / native session {native}]" if native else "]")
+    return text + tail
+
+
+def serve() -> None:
+    from mcp.server.mcpserver import MCPServer
+    mcp = MCPServer("a2a")
+
+    @mcp.tool()
+    def list_agents() -> str:
+        """List the agents on the local A2A mesh and whether each is up."""
+        return do_list()
+
+    @mcp.tool()
+    def send(agent: str, context: str, message: str) -> str:
+        """Send a message to an agent on the local A2A mesh; blocks until the
+        agent replies (can take minutes for real work).
+
+        agent: a name from list_agents (e.g. codex, kimi, gemini, claude).
+        context: conversation id, any string; reuse it to continue that
+        conversation, use a fresh one to start over.
+        message: the prompt to deliver."""
+        return do_send(agent, context, message)
+
+    mcp.run()
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if not args:
+        serve()
+    elif args[0] == "list" and len(args) == 1:
+        print(do_list())
+    elif args[0] == "send" and len(args) == 4:
+        print(do_send(args[1], args[2], args[3]))
+    else:
+        sys.exit("usage: a2a-mcp                      (MCP stdio server)\n"
+                 "       a2a-mcp list\n"
+                 "       a2a-mcp send <agent> <context> <message>")
+
+
+if __name__ == "__main__":
+    main()

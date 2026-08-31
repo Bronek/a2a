@@ -17,6 +17,15 @@ supported; each runs as its own daemon, launched and observed separately.
 - `a2a-chat [agent]` – REPL and one-shot client. `--status` shows which
   daemons are up, `--send` makes it scriptable, `--context` picks the
   conversation to continue.
+- `a2a-mcp` – MCP bridge: run with no arguments it is a stdio MCP server
+  exposing the mesh as `list_agents` / `send` tools, so any MCP-capable
+  agent CLI can drive the mesh through its native tool calling – its own
+  permission model, no shell escape, no sandbox loosening. The repo's
+  `.mcp.json` registers it for Claude Code sessions in this directory
+  (it resolves via `PATH`, so run `make install` first), and the
+  `a2a-review` project skill teaches the review choreography on top.
+  The same operations double as a CLI: `a2a-mcp list`,
+  `a2a-mcp send <agent> <context> <message>`.
 - `a2a-agent@.service` – systemd user template unit; one instance per agent
   (`systemctl --user start a2a-agent@claude`). NB the unit carries a
   `ConditionHost=` so that a home directory shared between hosts does not
