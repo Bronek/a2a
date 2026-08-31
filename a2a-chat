@@ -7,8 +7,10 @@
 
 Usage:
   a2a-chat <agent>                  interactive REPL
-  a2a-chat <agent> --send "msg"     one-shot, prints the reply and exits
+  a2a-chat <agent> "msg"            one-shot, prints the reply and exits
                                     (exit 2 if the worker reported an error)
+  a2a-post <agent> "msg"            fire and forget: the worker runs the turn
+  a2a-chat <agent> --post "msg"     but the reply is not waited for
   a2a-chat --status                 show which daemons are up (needs no key)
   a2a-chat <agent> --context ID     use a chosen A2A context id (any string);
                                     the daemon maps it to a native CLI session
@@ -103,7 +105,8 @@ def extract_text(result: dict) -> tuple[str, dict]:
 
 
 def send(client: httpx.Client, context_id: str, text: str,
-         workdir: str | None = None) -> tuple[str, dict]:
+         workdir: str | None = None,
+         read_timeout: float | None = None) -> tuple[str, dict]:
     message = {
         "kind": "message",
         "role": "user",
@@ -120,7 +123,9 @@ def send(client: httpx.Client, context_id: str, text: str,
         "method": "message/send",
         "params": {"message": message},
     }
-    r = client.post("/", json=payload)
+    kw = {} if read_timeout is None else {
+        "timeout": httpx.Timeout(10, read=read_timeout)}
+    r = client.post("/", json=payload, **kw)
     r.raise_for_status()
     try:
         data = r.json()
@@ -132,6 +137,33 @@ def send(client: httpx.Client, context_id: str, text: str,
     if "result" not in data:
         raise RuntimeError("malformed JSON-RPC response: no result")
     return extract_text(data["result"])
+
+
+# Long enough for a refusal the daemon makes before starting the CLI —
+# an unpinned workdir, a pin mismatch — to come back and be reported.
+# A real turn takes minutes and will not answer inside it.
+POST_GRACE_SECONDS = 6
+
+
+def post(client: httpx.Client, agent: str, context_id: str, text: str,
+         workdir: str | None = None) -> None:
+    """Send without waiting for the turn. The worker still runs it to
+    completion and its session advances; only the reply is discarded."""
+    try:
+        reply, meta = send(client, context_id, text, workdir,
+                           read_timeout=POST_GRACE_SECONDS)
+    except httpx.ReadTimeout:
+        # The expected path: the worker is busy doing the work.
+        print(f"queued to {agent} (context {context_id})", file=sys.stderr)
+        return
+    except (httpx.HTTPError, RuntimeError) as err:
+        die(f"{agent} daemon unreachable or failed: {err}")
+    # It answered inside the grace period: either a refusal, or a turn so
+    # short it finished already. Either way the caller should see it.
+    if meta.get("error"):
+        print(reply, file=sys.stderr)
+        sys.exit(2)
+    print(reply)
 
 
 def repl(client: httpx.Client, agent: str, context_id: str,
@@ -202,13 +234,26 @@ def main() -> None:
     # every one of them, so a defaulted agent cannot fail — it silently
     # opens a new conversation on the wrong worker.
     ap.add_argument("agent", nargs="?")
+    ap.add_argument("message", nargs="?",
+                    help="one-shot message; without one, a2a-chat opens a REPL")
     ap.add_argument("--context", help="A2A context id to use / resume")
     ap.add_argument("--workdir", help="working directory to pin a NEW "
                     "context to (required on a context's first message)")
     ap.add_argument("--send", metavar="MSG", help="one-shot message, then exit")
     ap.add_argument("--status", action="store_true",
                     help="show daemon status for all configured agents")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--post", action="store_true",
+                      help="do not wait for the reply; the worker still runs "
+                           "the turn (the default when invoked as a2a-post)")
+    mode.add_argument("--chat", action="store_true",
+                      help="wait for the reply (overrides an a2a-post name)")
     args = ap.parse_args()
+
+    # Invocation name selects the mode, so a2a-post is a symlink to this
+    # script rather than a second copy of it; --post/--chat override it.
+    posting = args.post or ("post" in Path(sys.argv[0]).name
+                            and not args.chat)
 
     conf = load_conf()
     if args.status:
@@ -220,11 +265,17 @@ def main() -> None:
     if args.agent not in conf:
         die(f"unknown agent {args.agent!r} (one of: {', '.join(conf)})")
 
+    text_in = args.message or args.send
+    if posting and not text_in:
+        die("posting needs a message: a2a-post <agent> \"msg\"")
+
     context_id = args.context or str(uuid.uuid4())
     with client_for(conf[args.agent]) as client:
-        if args.send:
+        if posting:
+            post(client, args.agent, context_id, text_in, args.workdir)
+        elif text_in:
             try:
-                text, meta = send(client, context_id, args.send, args.workdir)
+                text, meta = send(client, context_id, text_in, args.workdir)
             except (httpx.HTTPError, RuntimeError) as err:
                 die(f"{args.agent} daemon unreachable or failed: {err}")
             native = meta.get("native_session_id")

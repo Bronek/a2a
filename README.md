@@ -14,10 +14,19 @@ supported; each runs as its own daemon, launched and observed separately.
   virtualenv to manage) serving the A2A protocol – JSON-RPC `message/send` –
   on `127.0.0.1:<port>`, with the real work delegated to the CLI in
   non-interactive mode.
-- `a2a-chat [agent]` – REPL and one-shot client. `--status` shows which
-  daemons are up, `--send` makes it scriptable, `--context` picks the
-  conversation to continue, and `--workdir` pins a new one to its project.
-  In the REPL, `/context`, `/workdir` and `/new` do the same things.
+- `a2a-chat <agent>` – REPL and one-shot client. `--status` shows which
+  daemons are up, `--context` picks the conversation to continue, and
+  `--workdir` pins a new one to its project. In the REPL, `/context`,
+  `/workdir` and `/new` do the same things. The agent must be named: they
+  are peers, and a defaulted one would silently open a conversation on the
+  wrong worker rather than fail.
+- `a2a-post <agent> "msg"` – the same client under another name (a symlink),
+  which does not wait for the reply. The worker still runs the whole turn
+  and its session advances; only the answer is discarded, to be collected
+  later from the mailbox or on the next message. It waits a few seconds
+  first, so a refusal the daemon makes before starting work – an unpinned
+  workdir, a mismatched pin – is still reported rather than lost. `--post`
+  and `--chat` select the behaviour explicitly.
 - `a2a-mcp` – MCP bridge. Run with no arguments it is a stdio MCP server
   exposing the mesh as `list_agents` and `send` tools, so any MCP-capable
   agent CLI can drive the mesh through its native tool calling – its own
@@ -146,9 +155,12 @@ rather than ignoring it silently.
 systemctl --user start a2a-agent@{claude,gemini,codex,kimi}
 a2a-chat --status
 a2a-chat kimi                                  # REPL: /context, /workdir, /new
-a2a-chat codex --context review-42 --workdir ~/gits/proj --send "…"
+a2a-chat codex --context review-42 --workdir ~/gits/proj "…"
                                                # one-shot; --workdir pins a
                                                # new context to its project
+a2a-post kimi --context slice-a --workdir ~/gits/proj "start the analysis"
+                                               # fire and forget: the turn
+                                               # runs, the reply is not awaited
 tail -f ~/.local/state/a2a-agents/claude.log   # progress of one agent
 ```
 
