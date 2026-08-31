@@ -64,6 +64,11 @@ race.
 - Ports bind to loopback only, and every request must carry an `X-A2A-Key`
   header matching `~/.config/a2a-agents/api-key` (created on first start,
   mode 0600). Loopback alone is not a boundary on a multi-user machine.
+  The one exception is agent-card discovery (`/.well-known/agent-card.json`,
+  and the legacy `agent.json`), which is deliberately anonymous – the A2A
+  way is a public card that declares the required scheme in
+  `securitySchemes`, with authentication enforced on the RPC endpoint. This
+  is also what lets tools such as A2A Inspector see the agents at all.
 - An agent may be given secrets through `env_from_pass`: each entry is
   resolved with `pass show` per task and injected into that agent's
   subprocess only – no other agent sees it, nothing is stored or logged.

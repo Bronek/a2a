@@ -34,7 +34,7 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+from a2a.types import AgentCapabilities, AgentCard, AgentSkill, SecurityScheme
 from a2a.utils import new_agent_text_message
 
 CONFIG_FILE = Path.home() / ".config/a2a-agents/agents.toml"
@@ -244,14 +244,20 @@ class CliAgentExecutor(AgentExecutor):
 
 
 class KeyAuth:
-    """Minimal ASGI middleware: require X-A2A-Key on every HTTP request."""
+    """Minimal ASGI middleware: require X-A2A-Key on every HTTP request,
+    except agent-card discovery — A2A expects the card to be anonymously
+    fetchable, with the required scheme declared inside the card."""
+
+    OPEN_PATHS = ("/.well-known/agent-card.json", "/.well-known/agent.json")
 
     def __init__(self, app, key: str):
         self.app = app
         self.key = key.encode()
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
+        if scope["type"] == "http" and not (
+                scope.get("method") == "GET"
+                and scope.get("path") in self.OPEN_PATHS):
             headers = {k.lower(): v for k, v in scope.get("headers", [])}
             if not secrets.compare_digest(headers.get(b"x-a2a-key", b""),
                                           self.key):
@@ -280,6 +286,9 @@ def main() -> None:
         capabilities=AgentCapabilities(streaming=False),
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
+        security_schemes={"apiKey": SecurityScheme.model_validate(
+            {"type": "apiKey", "name": "X-A2A-Key", "in": "header"})},
+        security=[{"apiKey": []}],
         skills=[AgentSkill(
             id="chat", name="chat", tags=["cli", cfg["kind"]],
             description="Send a prompt; the wrapped CLI agent replies. "
