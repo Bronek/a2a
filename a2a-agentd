@@ -237,7 +237,16 @@ class CliAgentExecutor(AgentExecutor):
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps(self.sessions, indent=1))
+            f.flush()
+            os.fsync(f.fileno())
         tmp.rename(self.state_file)
+        # Sync the rename as well: a context->session map that loses its
+        # last entries to a power cut orphans those conversations.
+        dfd = os.open(STATE_DIR, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
     async def execute(self, context: RequestContext,
                       event_queue: EventQueue) -> None:

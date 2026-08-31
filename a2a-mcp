@@ -47,6 +47,12 @@ import httpx
 CONFIG_FILE = Path.home() / ".config/a2a-agents/agents.toml"
 KEY_FILE = Path.home() / ".config/a2a-agents/api-key"
 MAILBOX_DIR = Path.home() / ".local/state/a2a-agents/mailbox"
+# Bounds, not policy: a looping or mis-instructed worker holding only the
+# post tool would otherwise have an unmetered write primitive, and filling
+# the filesystem takes every daemon's save_state down with it.
+MAX_MESSAGE_BYTES = 256 * 1024
+MAX_BOX_MESSAGES = 2000
+STALE_TMP_SECONDS = 3600
 
 
 def load_conf() -> dict:
@@ -176,8 +182,36 @@ def _box(recipient: str) -> Path:
     return MAILBOX_DIR / recipient
 
 
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def do_post(recipient: str, message: str, sender: str | None = None) -> str:
     box = _box(recipient)
+    size = len(message.encode())
+    if size > MAX_MESSAGE_BYTES:
+        raise ValueError(
+            f"message is {size} bytes, over the {MAX_MESSAGE_BYTES}-byte "
+            f"limit for one post — post a summary and leave the bulk in a "
+            f"file the reader can open")
+    # Reap what interrupted posts left behind. Drains skip dotfiles, so
+    # nothing else ever removes these.
+    for stale in box.glob(".*.tmp"):
+        try:
+            if stale.stat().st_mtime < time.time() - STALE_TMP_SECONDS:
+                stale.unlink()
+        except OSError:
+            pass
+    held = sum(1 for p in box.iterdir()
+               if p.suffix == ".json" and not p.name.startswith("."))
+    if held >= MAX_BOX_MESSAGES:
+        raise ValueError(
+            f"mailbox {recipient!r} already holds {held} undrained messages; "
+            f"drain it before posting more")
     if not sender:
         # Inside a mesh worker the daemon exports these, so posts
         # self-identify down to the conversation they came from. Some CLIs
@@ -194,7 +228,12 @@ def do_post(recipient: str, message: str, sender: str | None = None) -> str:
         json.dump({"from": sender, "to": recipient,
                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                    "text": message}, f)
+        f.flush()
+        os.fsync(f.fileno())
     tmp.rename(box / f"{name}.json")
+    # The rename needs syncing too, or "posted" can outlive a power cut
+    # that the message itself does not.
+    _fsync_dir(box)
     return f"posted to {recipient}"
 
 
