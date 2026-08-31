@@ -27,7 +27,7 @@ timeout kill a send mid-flight.
 2. **Dispatch in parallel.** One fresh context per reviewer, named
    `review-<topic>`; contexts are per-agent, so the same name on both is
    fine. The first message must pin the context's working directory to the
-   code under review — `send(..., workdir=...)` / `a2a-chat --workdir`; a
+   code under review — `send(..., workdir=...)` / `a2a-chat --context <agent>/<ctx> --workdir`; a
    different directory later needs a new context name. Brief template:
 
    > Review the repository in your current working directory: README first,

@@ -14,16 +14,18 @@ supported; each runs as its own daemon, launched and observed separately.
   virtualenv to manage) serving the A2A protocol – JSON-RPC `message/send` –
   on `127.0.0.1:<port>`, with the real work delegated to the CLI in
   non-interactive mode.
-- `a2a-chat <agent>/<context>` – REPL and one-shot client. `--status` shows
-  which daemons are up and `--workdir` pins a new conversation to its
-  project. In the REPL, `/context`, `/workdir` and `/new` do the same
-  things. The agent must be named: the agents are peers, and a defaulted
-  one would silently open a conversation on the wrong worker rather than
-  fail. Agent and context are one address and can be written as one token —
-  `--context` accepts either half — so the pair survives being copied out of
-  a log or a note, instead of the agent being resupplied from memory at the
-  far end.
-- `a2a-post <agent> "msg"` – the same client under another name (a symlink),
+- `a2a-chat --context <agent>/<context>` – REPL and one-shot client. With a
+  message it says it and prints the reply; without one it opens a REPL,
+  where `/context`, `/workdir` and `/new` steer. `--status` shows which
+  daemons are up, and `--workdir` pins a new conversation to its project.
+  The address is one token, and the agent is inside it: the agents are
+  peers, so an agent that could be defaulted, or left in a separate
+  argument, is an agent that can drift away from the conversation it
+  scopes. Written this way the pair survives being copied out of a log or a
+  note, instead of the agent being resupplied from memory at the far end.
+  Leave the context off – `--context kimi` – to start a fresh one.
+- `a2a-post --context <agent>/<context> "msg"` – the same client under
+  another name (a symlink),
   which does not wait for the reply. The worker still runs the whole turn
   and its session advances; only the answer is discarded, to be collected
   later from the mailbox or on the next message. It waits a few seconds
@@ -157,11 +159,11 @@ rather than ignoring it silently.
 ```
 systemctl --user start a2a-agent@{claude,gemini,codex,kimi}
 a2a-chat --status
-a2a-chat kimi                                  # REPL: /context, /workdir, /new
-a2a-chat codex/review-42 --workdir ~/gits/proj "…"
+a2a-chat --context kimi                        # REPL on a fresh context
+a2a-chat --context codex/review-42 --workdir ~/gits/proj "…"
                                                # one-shot; --workdir pins a
                                                # new context to its project
-a2a-post kimi/slice-a --workdir ~/gits/proj "start the analysis"
+a2a-post --context kimi/slice-a --workdir ~/gits/proj "start the analysis"
                                                # fire and forget: the turn
                                                # runs, the reply is not awaited
 tail -f ~/.local/state/a2a-agents/claude.log   # progress of one agent
@@ -235,7 +237,7 @@ daemon ran them.
   the same Unix user, so any worker can drain any box, the human's included,
   and draining is destructive. Box names route mail; they do not protect it.
 - **Error signalling.** A worker-side failure comes back as a normal A2A
-  message flagged with `metadata.error`; `a2a-chat --send` exits 2 and
+  message flagged with `metadata.error`; a one-shot `a2a-chat` exits 2 and
   `a2a-mcp send` prefixes the reply with `ERROR`, so scripts and agents can
   tell failures from content.
 

@@ -6,19 +6,19 @@
 """REPL / one-shot client for the local A2A agent daemons.
 
 Usage:
-  a2a-chat <agent>                  interactive REPL
-  a2a-chat <agent>/<ctx> "msg"      one-shot, prints the reply and exits
-                                    (exit 2 if the worker reported an error)
-  a2a-post <agent>/<ctx> "msg"      fire and forget: the worker runs the turn
-  a2a-chat <agent> --post "msg"     but the reply is not waited for
+  a2a-chat --context AGENT[/CONTEXT]           interactive REPL
+  a2a-chat --context AGENT/CONTEXT "msg"       one-shot, prints the reply
+                                               (exit 2 on a worker error)
+  a2a-post --context AGENT/CONTEXT "msg"       fire and forget: the worker
+                                               runs the turn, the reply is
+                                               not waited for
+  a2a-chat --status                            which daemons are up (no key)
+  a2a-chat --context AGENT/CONTEXT --workdir DIR "msg"
+                                               pin a NEW context's directory
+                                               (required on its first message)
 
-An address is the pair <agent>/<context>; write it as one token so it can be
-copied around without the agent falling off. --context takes either half.
-  a2a-chat --status                 show which daemons are up (needs no key)
-  a2a-chat <agent> --context ID     use a chosen A2A context id (any string);
-                                    the daemon maps it to a native CLI session
-  a2a-chat <agent> --workdir DIR    pin a NEW context's working directory
-                                    (required on a context's first message)
+The address is <agent>/<context>: one token, so the agent cannot drift away
+from the conversation it scopes. Leave the context off for a fresh one.
 
 REPL commands: /context [id]  show or switch context
                /workdir [dir] show or set the workdir a NEW context pins
@@ -231,46 +231,40 @@ def repl(client: httpx.Client, agent: str, context_id: str,
         print(f"\n{text}\n")
 
 
-def split_address(text: str, conf: dict, bare_is_agent: bool) -> tuple:
-    """Split an <agent>/<context> address into its two halves.
+def parse_address(text: str, conf: dict) -> tuple:
+    """Split `<agent>[/<context>]`, the address of one conversation.
 
-    A slash always separates the pair and the part before it must name a
-    configured agent, so the form can never quietly mean something else.
-    Writing the address as one token is the point: it can be copied out of
-    a log or a note without the agent falling off on the way."""
-    head, sep, tail = text.partition("/")
-    if not sep:
-        return (text, None) if bare_is_agent else (None, text)
-    if head not in conf:
-        die(f"{head!r} is not an agent (one of: {', '.join(conf)}); "
-            f"an address is <agent>/<context>")
-    if not tail:
-        die(f"nothing after {head!r}/ — an address is <agent>/<context>")
-    return head, tail
+    The agent is always named here, so it cannot drift away from the
+    context it belongs to, and the pair survives being copied out of a log
+    or a note as one token. Omitting the context asks for a fresh one."""
+    agent, _, name = text.partition("/")
+    if agent not in conf:
+        die(f"unknown agent {agent!r} (one of: {', '.join(conf)}); "
+            f"--context is <agent>[/<context>]")
+    return agent, name or None
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(add_help=True)
-    # No default: the agents are peers, and every context name is valid on
-    # every one of them, so a defaulted agent cannot fail — it silently
-    # opens a new conversation on the wrong worker.
-    ap.add_argument("agent", nargs="?")
     ap.add_argument("message", nargs="?",
                     help="one-shot message; without one, a2a-chat opens a REPL")
-    ap.add_argument("--context",
-                    help="context to use / resume, as <name> or "
-                         "<agent>/<name>")
+    # The agent lives inside the address rather than in an argument of its
+    # own: naming it is then unavoidable, and it cannot be separated from
+    # the context it scopes.
+    ap.add_argument("--context", metavar="AGENT[/CONTEXT]",
+                    help="which agent, and which conversation with it "
+                         "(a fresh one if the context is left out)")
     ap.add_argument("--workdir", help="working directory to pin a NEW "
                     "context to (required on a context's first message)")
-    ap.add_argument("--send", metavar="MSG", help="one-shot message, then exit")
     ap.add_argument("--status", action="store_true",
                     help="show daemon status for all configured agents")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--post", action="store_true",
-                      help="do not wait for the reply; the worker still runs "
-                           "the turn (the default when invoked as a2a-post)")
+                      help="say the message and exit without waiting; the "
+                           "worker still runs the turn (default as a2a-post)")
     mode.add_argument("--chat", action="store_true",
-                      help="wait for the reply (overrides an a2a-post name)")
+                      help="wait for the reply, or open a REPL when there is "
+                           "no message (default as a2a-chat)")
     args = ap.parse_args()
 
     # Invocation name selects the mode, so a2a-post is a symlink to this
@@ -282,39 +276,16 @@ def main() -> None:
     if args.status:
         show_status(conf)
         return
-    # When --context carries the address, a lone positional is the message:
-    # argparse fills positionals in order, so it would otherwise land in the
-    # agent slot. Left alone if it names an agent, because then the two
-    # spellings genuinely disagree and should say so.
-    if (args.context and "/" in args.context and args.agent
-            and args.message is None and "/" not in args.agent
-            and args.agent not in conf):
-        args.agent, args.message = None, args.agent
-
-    # The mesh address is the pair (agent, context) — the daemon keys on
-    # both — so it can be written as one token, in either position.
-    agent = ctx = None
-    if args.agent:
-        agent, ctx = split_address(args.agent, conf, True)
-    if args.context:
-        c_agent, c_ctx = split_address(args.context, conf, False)
-        if c_agent and agent and c_agent != agent:
-            die(f"two different agents in one address, {agent!r} and "
-                f"{c_agent!r} — name it once")
-        if ctx and c_ctx and ctx != c_ctx:
-            die(f"two different contexts, {ctx!r} and {c_ctx!r} — "
-                f"name it once")
-        agent, ctx = agent or c_agent, c_ctx or ctx
-    if not agent:
-        die(f"name an agent: one of {', '.join(conf)} "
-            f"(only --status works without one)")
-    if agent not in conf:
-        die(f"unknown agent {agent!r} (one of: {', '.join(conf)})")
+    if not args.context:
+        die(f"--context AGENT[/CONTEXT] is required, agent one of "
+            f"{', '.join(conf)} (only --status works without it)")
+    agent, ctx = parse_address(args.context, conf)
     args.agent = agent
 
-    text_in = args.message or args.send
+    text_in = args.message
     if posting and not text_in:
-        die("posting needs a message: a2a-post <agent>/<context> \"msg\"")
+        die('posting needs a message: '
+            'a2a-post --context AGENT/CONTEXT "msg"')
 
     context_id = ctx or str(uuid.uuid4())
     with client_for(conf[args.agent]) as client:
