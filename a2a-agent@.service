@@ -3,11 +3,18 @@ Description=A2A agent daemon (%i)
 # Shared home: the A2A agent mesh runs only on gdansk.
 ConditionHost=gdansk*
 After=network.target
+# RestartSec=3 alone never trips the default 5-per-10s start limit, so a
+# permanent failure (bad config, occupied port) would crash-loop forever;
+# widen the window so systemd gives up after five failures in a minute.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 ExecStartPre=/usr/bin/mkdir -p %h/.local/state/a2a-agents
 ExecStart=%h/.local/bin/a2a-agentd %i
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Logs and state may reference private conversations: no group/other access.
+UMask=0077
 # This user cannot read the systemd journal on gdansk, so log to files:
 #   tail -f ~/.local/state/a2a-agents/<agent>.log
 StandardOutput=append:%h/.local/state/a2a-agents/%i.log

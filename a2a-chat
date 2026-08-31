@@ -8,7 +8,8 @@
 Usage:
   a2a-chat [agent]                  interactive REPL (default agent: claude)
   a2a-chat [agent] --send "msg"     one-shot, prints the reply and exits
-  a2a-chat --status                 show which daemons are up
+                                    (exit 2 if the worker reported an error)
+  a2a-chat --status                 show which daemons are up (needs no key)
   a2a-chat [agent] --context ID     use a chosen A2A context id (any string);
                                     the daemon maps it to a native CLI session
 
@@ -34,35 +35,43 @@ def die(msg: str) -> None:
 
 
 def load_conf() -> dict:
-    return tomllib.loads(CONFIG_FILE.read_text())
+    conf = tomllib.loads(CONFIG_FILE.read_text())
+    return {n: c for n, c in conf.items()
+            if isinstance(c, dict) and "port" in c}
 
 
-def client_for(port: int) -> httpx.Client:
+def client_for(cfg: dict) -> httpx.Client:
     try:
         key = KEY_FILE.read_text().strip()
     except FileNotFoundError:
-        die(f"{KEY_FILE} not found — start a daemon once to create it")
-    return httpx.Client(base_url=f"http://127.0.0.1:{port}",
+        key = ""
+    if not key:
+        die(f"{KEY_FILE} not found or empty — start a daemon once to create it")
+    # Read timeout tracks the daemon's own per-agent task timeout.
+    read = cfg.get("timeout", 1800) + 120
+    return httpx.Client(base_url=f"http://127.0.0.1:{cfg['port']}",
                         headers={"X-API-Key": key},
-                        timeout=httpx.Timeout(10, read=1800))
+                        timeout=httpx.Timeout(10, read=read))
 
 
 def show_status(conf: dict) -> None:
+    # Card endpoints are anonymous: no key is read and, deliberately, none is
+    # sent — a squatter on a down daemon's port must not receive the key.
     for name, cfg in conf.items():
-        if not isinstance(cfg, dict) or "port" not in cfg:
-            continue
-        with client_for(cfg["port"]) as c:
-            state = "DOWN"
-            for path in ("/.well-known/agent-card.json",
-                         "/.well-known/agent.json"):
+        state = "DOWN"
+        for path in ("/.well-known/agent-card.json", "/.well-known/agent.json"):
+            try:
+                r = httpx.get(f"http://127.0.0.1:{cfg['port']}{path}",
+                              timeout=3)
+            except httpx.TransportError:
+                continue
+            if r.status_code == 200:
                 try:
-                    r = c.get(path, timeout=3)
-                    if r.status_code == 200:
-                        state = f"up ({r.json().get('name')})"
-                        break
-                    state = f"HTTP {r.status_code}"
-                except httpx.TransportError:
-                    pass
+                    state = f"up ({r.json().get('name')})"
+                except ValueError:
+                    state = "answers, but not with an agent card"
+                break
+            state = f"HTTP {r.status_code}"
         print(f"{name:>8}  port {cfg['port']}  {state}")
 
 
@@ -141,6 +150,11 @@ def repl(client: httpx.Client, agent: str, context_id: str) -> None:
             continue
         try:
             text, meta = send(client, context_id, line)
+        except KeyboardInterrupt:
+            print("\n[interrupted locally — the worker still finishes this "
+                  "turn server-side; its reply is lost but the session "
+                  "advances]\n")
+            continue
         except Exception as err:
             print(f"\n[error] {err}\n")
             continue
@@ -148,6 +162,9 @@ def repl(client: httpx.Client, agent: str, context_id: str) -> None:
         if native and native != last_native:
             print(f"(native {agent} session: {native})")
             last_native = native
+        if meta.get("error"):
+            print(f"\n[worker error] {text}\n")
+            continue
         print(f"\n{text}\n")
 
 
@@ -168,13 +185,19 @@ def main() -> None:
         die(f"unknown agent {args.agent!r} (one of: {', '.join(conf)})")
 
     context_id = args.context or str(uuid.uuid4())
-    with client_for(conf[args.agent]["port"]) as client:
+    with client_for(conf[args.agent]) as client:
         if args.send:
-            text, meta = send(client, context_id, args.send)
+            try:
+                text, meta = send(client, context_id, args.send)
+            except httpx.HTTPError as err:
+                die(f"{args.agent} daemon unreachable or failed: {err}")
             native = meta.get("native_session_id")
             if native:
                 print(f"(context {context_id} -> native session {native})",
                       file=sys.stderr)
+            if meta.get("error"):
+                print(text, file=sys.stderr)
+                sys.exit(2)
             print(text)
         else:
             repl(client, args.agent, context_id)

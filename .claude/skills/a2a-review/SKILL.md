@@ -45,10 +45,13 @@ timeout kill a send mid-flight.
    before accepting it — reviewers hallucinate line numbers and APIs.
    Confirmed-by-both ≻ confirmed-by-one ≻ disputed. Reject with a written
    reason rather than silently dropping.
-5. **Fix and commit.** Apply accepted fixes; commit ending with exactly
-   `Assisted-by: Claude:<model-id>` and no other AI trailer. The user signs
-   and pushes themselves. Offer a re-review of the diff to the reviewer
-   that raised each finding.
+5. **Report — and fix only when asked.** Present the triage: accepted,
+   rejected, each with a reason. When the user's request included fixing
+   or improving, apply the accepted fixes and commit, ending with exactly
+   `Assisted-by: Claude:<model-id>` and no other AI trailer — the user
+   signs and pushes themselves. When the request was review-only, stop at
+   the report. Either way, offer a re-review of the resulting diff to the
+   reviewer that raised each finding.
 
 ## Caveats
 

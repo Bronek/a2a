@@ -36,11 +36,11 @@ def load_conf() -> dict:
             if isinstance(c, dict) and "port" in c}
 
 
-def client_for(port: int) -> httpx.Client:
-    key = KEY_FILE.read_text().strip()
-    return httpx.Client(base_url=f"http://127.0.0.1:{port}",
-                        headers={"X-API-Key": key},
-                        timeout=httpx.Timeout(10, read=1800))
+def read_key() -> str:
+    try:
+        return KEY_FILE.read_text().strip()
+    except FileNotFoundError:
+        return ""
 
 
 def extract_text(result: dict) -> tuple[str, dict]:
@@ -68,16 +68,21 @@ def extract_text(result: dict) -> tuple[str, dict]:
 
 
 def do_list() -> str:
+    # Card endpoints are anonymous: no key is read and, deliberately, none is
+    # sent — a squatter on a down daemon's port must not receive the key.
     lines = []
     for name, cfg in load_conf().items():
         state = "DOWN"
         try:
-            with client_for(cfg["port"]) as c:
-                r = c.get("/.well-known/agent-card.json", timeout=3)
-                if r.status_code == 200:
+            r = httpx.get(f"http://127.0.0.1:{cfg['port']}"
+                          f"/.well-known/agent-card.json", timeout=3)
+            if r.status_code == 200:
+                try:
                     state = f"up — {r.json().get('description', '')}"
-                else:
-                    state = f"HTTP {r.status_code}"
+                except ValueError:
+                    state = "answers, but not with an agent card"
+            else:
+                state = f"HTTP {r.status_code}"
         except httpx.TransportError:
             pass
         lines.append(f"{name} (port {cfg['port']}): {state}")
@@ -88,6 +93,11 @@ def do_send(agent: str, context: str, message: str) -> str:
     conf = load_conf()
     if agent not in conf:
         return f"ERROR: unknown agent {agent!r} (one of: {', '.join(conf)})"
+    key = read_key()
+    if not key:
+        return (f"ERROR: {KEY_FILE} not found or empty — "
+                f"start a daemon once to create it")
+    cfg = conf[agent]
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
@@ -101,7 +111,11 @@ def do_send(agent: str, context: str, message: str) -> str:
         }},
     }
     try:
-        with client_for(conf[agent]["port"]) as c:
+        with httpx.Client(
+                base_url=f"http://127.0.0.1:{cfg['port']}",
+                headers={"X-API-Key": key},
+                timeout=httpx.Timeout(10, read=cfg.get("timeout", 1800) + 120),
+        ) as c:
             r = c.post("/", json=payload)
             r.raise_for_status()
             data = r.json()
@@ -114,6 +128,8 @@ def do_send(agent: str, context: str, message: str) -> str:
     native = meta.get("native_session_id")
     tail = f"\n\n[{agent} / context {context}" \
            + (f" / native session {native}]" if native else "]")
+    if meta.get("error"):
+        return f"ERROR (worker-side): {text}" + tail
     return text + tail
 
 
@@ -129,7 +145,8 @@ def serve() -> None:
     @mcp.tool()
     def send(agent: str, context: str, message: str) -> str:
         """Send a message to an agent on the local A2A mesh; blocks until the
-        agent replies (can take minutes for real work).
+        agent replies (can take minutes for real work). A reply starting
+        with "ERROR" means the turn failed — do not treat it as content.
 
         agent: a name from list_agents (e.g. codex, kimi, gemini, claude).
         context: conversation id, any string; reuse it to continue that
@@ -147,7 +164,10 @@ def main() -> None:
     elif args[0] == "list" and len(args) == 1:
         print(do_list())
     elif args[0] == "send" and len(args) == 4:
-        print(do_send(args[1], args[2], args[3]))
+        out = do_send(args[1], args[2], args[3])
+        print(out)
+        if out.startswith("ERROR"):
+            sys.exit(2)
     else:
         sys.exit("usage: a2a-mcp                      (MCP stdio server)\n"
                  "       a2a-mcp list\n"

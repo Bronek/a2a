@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -47,13 +48,24 @@ def log(msg: str) -> None:
 
 
 def load_or_create_key() -> str:
-    try:
-        fd = os.open(KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return KEY_FILE.read_text().strip()
-    with os.fdopen(fd, "w") as f:
-        key = secrets.token_hex(32)
-        f.write(key + "\n")
+    """Create the key atomically (write-then-link), so neither concurrent
+    first starts nor a crash mid-write can leave a readable empty key file
+    — an empty key would turn compare_digest into an accept-all."""
+    if not KEY_FILE.exists():
+        KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = KEY_FILE.with_name(f".api-key.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_hex(32) + "\n")
+        try:
+            os.link(tmp, KEY_FILE)  # atomic; loses gracefully to a racer
+        except FileExistsError:
+            pass
+        finally:
+            os.unlink(tmp)
+    key = KEY_FILE.read_text().strip()
+    if len(key) < 32:
+        sys.exit(f"{KEY_FILE} is empty or too short — delete it and restart")
     return key
 
 
@@ -77,10 +89,12 @@ def resolve_pass_env(mapping: dict[str, str]) -> dict[str, str]:
 class CliAdapter:
     """Build argv and parse output for one CLI flavour."""
 
-    def __init__(self, kind: str, command: str, extra_args: list[str]):
+    def __init__(self, kind: str, command: str, extra_args: list[str],
+                 trust_workspace: bool = False):
         self.kind = kind
         self.command = command
         self.extra = extra_args
+        self.trust = trust_workspace
 
     def chooses_own_id(self) -> bool:
         # claude and gemini accept a caller-chosen --session-id;
@@ -88,27 +102,31 @@ class CliAdapter:
         return self.kind in ("codex", "kimi")
 
     def build(self, prompt: str, native_id: str | None, resume: bool,
-              lastmsg: str) -> list[str]:
+              lastmsg: str) -> tuple[list[str], str | None]:
+        """Return (argv, stdin_text). The prompt travels via stdin where the
+        CLI supports it, keeping it out of /proc/<pid>/cmdline."""
         c = self.command
         if self.kind == "claude":
             sel = ["--resume", native_id] if resume else ["--session-id", native_id]
-            return [c, "-p", "--output-format", "json", *sel, *self.extra, prompt]
+            return [c, "-p", "--output-format", "json", *sel, *self.extra], prompt
         if self.kind == "gemini":
             sel = ["--resume", native_id] if resume else ["--session-id", native_id]
-            # --skip-trust: headless runs refuse untrusted workspaces otherwise
-            return [c, "-o", "json", "--skip-trust", *sel, *self.extra,
-                    "-p", prompt]
+            # headless gemini refuses untrusted workspaces; bypass the prompt
+            # only when the configuration vouches for the workdir
+            trust = ["--skip-trust"] if self.trust else []
+            return [c, "-o", "json", *trust, *sel, *self.extra, "-p", ""], prompt
         if self.kind == "codex":
             common = ["--json", "--skip-git-repo-check",
                       "--output-last-message", lastmsg, *self.extra]
             if resume:
-                return [c, "exec", "resume", *common, native_id, prompt]
-            return [c, "exec", *common, prompt]
+                return [c, "exec", "resume", *common, native_id, "-"], prompt
+            return [c, "exec", *common, "-"], prompt
         if self.kind == "kimi":
-            # kimi's own session.resume_hint says `kimi -r <id>`
+            # kimi's own session.resume_hint says `kimi -r <id>`; it has no
+            # stdin prompt mode, so its prompt remains visible in argv
             sel = ["-r", native_id] if resume else []
             return [c, *sel, "--output-format", "stream-json", *self.extra,
-                    "-p", prompt]
+                    "-p", prompt], None
         raise ValueError(f"unknown adapter kind: {self.kind}")
 
     def parse(self, stdout: str, lastmsg: str) -> tuple[str, str | None]:
@@ -161,7 +179,8 @@ class CliAgentExecutor(AgentExecutor):
         self.name = name
         self.cfg = cfg
         self.adapter = CliAdapter(cfg["kind"], cfg.get("command", name),
-                                  cfg.get("extra_args", []))
+                                  cfg.get("extra_args", []),
+                                  cfg.get("trust_workspace", False))
         self.workdir = Path(cfg.get("workdir", "~")).expanduser()
         self.timeout = cfg.get("timeout", 1800)
         self.state_file = STATE_DIR / f"{name}.json"
@@ -171,9 +190,11 @@ class CliAgentExecutor(AgentExecutor):
         self.locks: dict[str, asyncio.Lock] = {}
 
     def save_state(self) -> None:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.sessions, indent=1))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(self.sessions, indent=1))
         tmp.rename(self.state_file)
 
     async def execute(self, context: RequestContext,
@@ -186,7 +207,7 @@ class CliAgentExecutor(AgentExecutor):
                 reply, native = await self.run_turn(ctx_id, prompt)
                 meta = {"agent": self.name, "native_session_id": native}
             except Exception as err:
-                log(f"[{ctx_id}] FAILED: {err}")
+                log(f"[{ctx_id!r}] FAILED: {err}")
                 reply = f"ERROR from {self.name} worker: {err}"
                 meta = {"agent": self.name, "error": True}
         msg = new_agent_text_message(reply, context_id=ctx_id,
@@ -198,45 +219,90 @@ class CliAgentExecutor(AgentExecutor):
         native = self.sessions.get(ctx_id)
         resume = native is not None
         if not resume and not self.adapter.chooses_own_id():
-            # Deterministic native id so the same context always maps to the
-            # same CLI session, even if state is lost.
+            # Deterministic native id: the same context maps to the same CLI
+            # session while state is intact; after state loss the create
+            # collides with the existing session and the retry below falls
+            # back to resuming it.
             native = str(uuid.uuid5(uuid.NAMESPACE_URL,
                                     f"a2a://{self.name}/{ctx_id}"))
 
         env = os.environ.copy()
         if self.cfg.get("env_from_pass"):
-            env.update(resolve_pass_env(self.cfg["env_from_pass"]))
+            env.update(await asyncio.to_thread(
+                resolve_pass_env, self.cfg["env_from_pass"]))
 
         with tempfile.NamedTemporaryFile(mode="r", suffix=".txt") as lm:
-            cmd = self.adapter.build(prompt, native, resume, lm.name)
-            log(f"[{ctx_id}] {'resume' if resume else 'new'} "
+            cmd, stdin_text = self.adapter.build(prompt, native, resume,
+                                                 lm.name)
+            log(f"[{ctx_id!r}] {'resume' if resume else 'new'} "
                 f"native={native or '(cli-chosen)'} prompt={prompt[:60]!r}")
             t0 = time.monotonic()
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=self.workdir, env=env,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                raise RuntimeError(f"timed out after {self.timeout}s")
+            rc, stdout, stderr = await self._invoke(cmd, stdin_text, env)
+            # Two recoverable session mishaps, retried once in the opposite
+            # mode: a create that collides with an existing session (state
+            # was lost), and a resume of a session the CLI no longer has
+            # (CLIs expire or directory-scope their stores).
+            retry: bool | None = None
+            low = stderr.lower()
+            if (rc != 0 and not resume and not self.adapter.chooses_own_id()
+                    and "already" in low):
+                retry = True
+                log(f"[{ctx_id!r}] create collided with existing session, "
+                    f"retrying as resume")
+            elif rc != 0 and resume and ("invalid session" in low
+                                         or "not found" in low
+                                         or "different directory" in low):
+                retry = False
+                log(f"[{ctx_id!r}] resume failed ({stderr.strip()[:120]!r}), "
+                    f"starting a fresh native session")
+            if retry is not None:
+                resume = retry
+                if not resume and self.adapter.chooses_own_id():
+                    native = None
+                cmd, stdin_text = self.adapter.build(prompt, native, resume,
+                                                     lm.name)
+                rc, stdout, stderr = await self._invoke(cmd, stdin_text, env)
             dt = time.monotonic() - t0
-            if proc.returncode != 0:
+            if rc != 0:
                 raise RuntimeError(
-                    f"{cmd[0]} exited {proc.returncode} after {dt:.0f}s: "
-                    f"{stderr.decode(errors='replace').strip()[:500]}")
-            text, parsed_id = self.adapter.parse(stdout.decode(errors="replace"),
-                                                 lm.name)
+                    f"{cmd[0]} exited {rc} after {dt:.0f}s: "
+                    f"{stderr.strip()[:500]}")
+            try:
+                text, parsed_id = self.adapter.parse(stdout, lm.name)
+            except Exception as err:
+                raise RuntimeError(
+                    f"cannot parse {cmd[0]} output ({err}); "
+                    f"stdout tail: {stdout[-300:]!r}")
         native = parsed_id or native
         if not native:
             raise RuntimeError("could not determine native session id from output")
         if self.sessions.get(ctx_id) != native:
             self.sessions[ctx_id] = native
             self.save_state()
-        log(f"[{ctx_id}] done in {dt:.0f}s native={native} reply={len(text)}ch")
+        log(f"[{ctx_id!r}] done in {dt:.0f}s native={native} reply={len(text)}ch")
         return text, native
+
+    async def _invoke(self, cmd: list[str], stdin_text: str | None,
+                      env: dict) -> tuple[int, str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=self.workdir, env=env, start_new_session=True,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(stdin_text.encode() if stdin_text else None),
+                timeout=self.timeout)
+        except asyncio.TimeoutError:
+            # SIGKILL the whole process group, not just the CLI wrapper,
+            # so tools the agent spawned do not outlive the failed turn
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            await proc.wait()
+            raise RuntimeError(f"timed out after {self.timeout}s")
+        return (proc.returncode, stdout.decode(errors="replace"),
+                stderr.decode(errors="replace"))
 
     async def cancel(self, context: RequestContext,
                      event_queue: EventQueue) -> None:

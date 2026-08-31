@@ -24,6 +24,10 @@ extra_args = []
 kind = "gemini"
 command = "gemini"
 port = 8003
+# Headless gemini refuses untrusted workspaces. Setting this passes
+# --skip-trust, which lets a checkout's own .gemini/ config run as you —
+# enable it only for workdirs whose content you trust.
+# trust_workspace = true
 # extra_args = ["--approval-mode", "auto_edit"]
 extra_args = []
 

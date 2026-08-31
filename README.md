@@ -85,12 +85,32 @@ race.
   in an interactive shell does it).
 - Agents run in their CLIs' default permission modes, which is deliberately
   conservative; grant more through `extra_args` per agent, and only as much
-  as the workload needs.
+  as the workload needs. The gemini worker additionally refuses untrusted
+  workspaces unless `trust_workspace = true` is set for it – enabling that
+  lets the workdir's own `.gemini/` configuration run as you, so set it
+  only for workdirs whose content you trust.
+- Prompts are delivered to the CLIs via stdin, keeping them out of
+  `/proc/<pid>/cmdline` – except for kimi, which has no stdin mode and
+  keeps its prompt visible in argv for the duration of the turn.
+- A worker-side failure comes back as a normal A2A message flagged with
+  `metadata.error`; `a2a-chat --send` exits 2 and `a2a-mcp send` prefixes
+  the reply with `ERROR`, so scripts and agents can tell failures from
+  content.
 
 ## Limitations
 
 Responses are single-shot – no streaming, no incremental task updates – and
 `tasks/cancel` is not implemented; a slow turn simply runs until it finishes
 or hits the per-agent timeout. Log files under `~/.local/state/a2a-agents/`
-grow without rotation, though at a line or two per task this takes a while to
-matter.
+grow without rotation, though at a line or two per task this takes a while
+to matter; the same goes for the context→session maps, which are never
+pruned. The CLIs own their session stores and can lose them (gemini expires
+old sessions, kimi and claude scope theirs to a directory): when a resume
+fails for such a reason, the daemon starts a fresh native session under the
+same context and logs it — the conversation's history is gone, so re-state
+what matters rather than assuming the agent remembers. Subprocess output is buffered unbounded in memory, so a runaway CLI
+emitting gigabytes could OOM its daemon. And while status checks are
+anonymous by design, a `message/send` necessarily presents the key to
+whatever holds the port – if a daemon is down, a local squatter on its port
+could harvest it; a unix-socket transport would close that hole and is
+future work.
