@@ -31,7 +31,8 @@ Rules that matter:
 ## The mailbox (asynchronous, one-way)
 
 Long tasks should not save everything for one final reply. The `spool`
-tool (`a2a-mcp spool <recipient> <message>` from a shell) drops a message
+tool (`a2a-mcp spool <recipient> <message|->` from a shell; - reads the
+message from stdin, verbatim) drops a message
 into a named box without blocking; `check_mail` / `a2a-mcp mail
 <recipient>` drains one. Conventions:
 

@@ -20,7 +20,7 @@ access but no MCP client:
   a2a-mcp send|post -c ... "msg"        the same two, spelled as verbs;
                                         --send / --post override either
   a2a-mcp list                          which daemons are up (no key sent)
-  a2a-mcp spool <recipient> <msg> [sender]  drop mail into a box
+  a2a-mcp spool <recipient> <msg|-> [sender]  drop mail into a box
   a2a-mcp mail <recipient>                  drain a box now
   a2a-mcp watch <recipient> [timeout]       block until mail, then drain
 
@@ -38,7 +38,8 @@ it is an error for anything to accompany it. There is no REPL: to
 continue a conversation, send again with the same address.
 
 spool/mail/watch are the asynchronous mailbox: `spool` drops a message
-into a named box without blocking (findings delivered as they emerge),
+into a named box without blocking (findings delivered as they emerge;
+a lone - in the message slot reads it from stdin, verbatim),
 `mail` drains a box now, and `watch` blocks until mail arrives, then
 drains it — run it in the background as a doorbell for a live session.
 Boxes are plain 0700 directories under ~/.local/state/a2a-agents/mailbox;
@@ -537,7 +538,7 @@ USAGE = """usage: a2a-mcp                        (MCP stdio server)
        a2a-post -c AGENT[/CONTEXT] [--workdir DIR | --here] "msg"
        a2a-mcp send|post -c ...       (the same two, spelled as verbs)
        a2a-mcp list
-       a2a-mcp spool <recipient> <message> [sender]     (mailbox)
+       a2a-mcp spool <recipient> <message|-> [sender]   (mailbox)
        a2a-mcp mail <recipient>
        a2a-mcp watch <recipient> [timeout-seconds]"""
 
@@ -561,7 +562,14 @@ def main() -> None:
     elif args[0] == "post":
         agent_cli(args[1:], default_post=True, prog=f"{name} post")
     elif args[0] == "spool" and len(args) in (3, 4):
-        print(do_spool(args[1], args[2],
+        msg = args[2]
+        if msg == "-":
+            # CLI only, never do_spool itself: the MCP server's stdin is
+            # the protocol transport, and the tool must not read it.
+            msg = sys.stdin.read()
+            if not msg.strip():
+                die("stdin was empty — nothing to spool")
+        print(do_spool(args[1], msg,
                        args[3] if len(args) == 4 else None))
     elif args[0] == "mail" and len(args) == 2:
         do_check(args[1], deliver=deliver_stdout)
