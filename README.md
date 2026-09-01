@@ -28,7 +28,9 @@ supported; each runs as its own daemon, launched and observed separately.
   one-shot name: says the message, prints the reply. Continuing a
   conversation is another one-shot with the same address; there is
   deliberately no REPL to hold state of its own. `--workdir` (or `--here`)
-  pins a new conversation to its project.
+  pins a new conversation to its project. A single `-` as the message
+  reads it from stdin, verbatim – for multi-line prompts and anything the
+  shell would mangle.
   The address is one token, and the agent is inside it: the agents are
   peers, so an agent that could be defaulted, or left in a separate
   argument, is an agent that can drift away from the conversation it

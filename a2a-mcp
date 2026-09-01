@@ -31,8 +31,10 @@ continued). A NEW context pins its working directory on its first
 message: pass --workdir DIR, or --here for the current directory. Bare
 message words are joined with single spaces; quote the message when its
 exact spacing matters, and put -- before one that starts with a dash
-(quoting alone does not stop argparse reading it as an option). There
-is no REPL: to
+(quoting alone does not stop argparse reading it as an option). A
+single - as the whole message reads it from stdin instead, verbatim —
+the form for multi-line prompts and anything a shell would mangle;
+it is an error for anything to accompany it. There is no REPL: to
 continue a conversation, send again with the same address.
 
 spool/mail/watch are the asynchronous mailbox: `spool` drops a message
@@ -245,7 +247,9 @@ def agent_cli(argv: list[str], default_post: bool,
     # quoted; quote it when its exact spacing matters, and use -- when it
     # starts with a dash — quoting alone does not stop argparse reading it
     # as an option.
-    ap.add_argument("message", nargs="*", help="the message to send")
+    ap.add_argument("message", nargs="*",
+                    help="the message to send; a single - reads it from "
+                         "stdin instead, verbatim")
     # The agent lives inside the address rather than in an argument of its
     # own: naming it is then unavoidable, and it cannot be separated from
     # the context it scopes.
@@ -284,10 +288,23 @@ def agent_cli(argv: list[str], default_post: bool,
             f"use `a2a-mcp spool <box> <msg>`)")
     agent, ctx = parse_address(args.context, conf)
 
-    text_in = " ".join(args.message) if args.message else None
+    if "-" in args.message:
+        # Deliberately strict: - promises "nothing after this", so extra
+        # words are a parse error, not extra message — silently joining
+        # them would hide a shell mangling the exact command the user
+        # meant to run.
+        if args.message != ["-"]:
+            die("'-' reads the message from stdin and must be the only "
+                "message argument")
+        text_in = sys.stdin.read()
+        if not text_in.strip():
+            die("stdin was empty — nothing to send")
+    else:
+        text_in = " ".join(args.message) if args.message else None
     if not text_in:
-        die("nothing to send — give a message; to continue a conversation, "
-            "send again with the same -c address")
+        die("nothing to send — give a message (or - to read it from "
+            "stdin); to continue a conversation, send again with the "
+            "same -c address")
 
     context_id = ctx or str(uuid.uuid4())
     if posting:
