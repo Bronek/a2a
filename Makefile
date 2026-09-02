@@ -2,7 +2,7 @@ BIN_DIR  := $(HOME)/.local/bin
 UNIT_DIR := $(HOME)/.config/systemd/user
 CONF_DIR := $(HOME)/.config/a2a-agents
 
-.PHONY: install uninstall
+.PHONY: install uninstall test lint check
 
 install:
 	install -d $(BIN_DIR) $(UNIT_DIR) $(CONF_DIR)
@@ -24,3 +24,13 @@ uninstall:
 		$(BIN_DIR)/a2a-send $(BIN_DIR)/a2a-post
 	rm -f $(UNIT_DIR)/a2a-agent@.service
 	systemctl --user daemon-reload
+
+# The checks run from the project environment (pyproject.toml) that uv
+# creates on first use; the scripts themselves never need it.
+test:
+	uv run pytest
+
+lint:
+	uv run ruff check
+
+check: lint test

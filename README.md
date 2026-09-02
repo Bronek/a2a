@@ -258,6 +258,18 @@ concurrently.
   raises a tool error, so scripts and agents can tell failures from
   content.
 
+## Development
+
+The scripts stay self-contained, but the checks need somewhere to run:
+`pyproject.toml` declares the same dependencies plus pytest and ruff,
+and `uv run` creates `.venv/` from it on first use (the scripts never
+touch it). `make test` runs the unit tests – the adapters, the session
+state and its recovery paths, the auth middleware, the client and the
+mailbox, all with the CLIs and the daemons faked, so nothing on the mesh
+is needed or disturbed. `make lint` runs ruff; `make check` runs both. A
+test also holds the inline script metadata and the project file to the
+same dependency list, so the two cannot drift apart unnoticed.
+
 ## Limitations
 
 - **Single-shot responses.** No streaming, no incremental task updates, and
