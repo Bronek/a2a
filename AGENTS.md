@@ -38,7 +38,7 @@ into a named box without blocking; `check_mail` / `a2a-mcp mail
 
 - Spool findings to **`lead`** as they emerge — per subagent result, per
   phase — then still finish with a proper final reply to your caller.
-  The box **`bronek`** reaches the human.
+  The box **`op`** reaches the human operator.
 - Delivery is at-least-once with no read receipt: fine for reports and
   progress, wrong for handshakes — never wait for an answer to spooled
   mail.

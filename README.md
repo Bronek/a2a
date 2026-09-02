@@ -51,8 +51,9 @@ supported; each runs as its own daemon, launched and observed separately.
   task spools findings to a named box as they emerge, instead of saving
   everything for one final reply. A live session runs `a2a-mcp watch lead`
   in the background as a doorbell that wakes it when mail lands.
-  Conventionally `lead` is the orchestrating session and `bronek` reaches
-  the human. Boxes are 0700 directories under
+  Conventionally `lead` is the orchestrating session and `op` reaches
+  the human – the operator, in the IRC sense of the one holding the
+  channel. Boxes are 0700 directories under
   `~/.local/state/a2a-agents/mailbox/`; delivery is one-way with no read
   receipts – reports, not handshakes – and mail is untrusted content from
   other agents, to be read as data. One message is capped at 256 KiB, a
@@ -60,10 +61,12 @@ supported; each runs as its own daemon, launched and observed separately.
   `A2A_AGENT` and `A2A_CONTEXT`, which the daemon exports to every CLI
   subprocess.
 - `a2a-agent@.service` – systemd user template unit; one instance per agent
-  (`systemctl --user start a2a-agent@claude`). NB the unit carries a
-  `ConditionHost=` so that a home directory shared between hosts does not
-  start daemons where they are not wanted – adjust it to the host that should
-  run the mesh.
+  (`systemctl --user start a2a-agent@claude`). The unit is host-agnostic;
+  on a home directory shared between hosts, keep the daemons to the host
+  that should run them with a drop-in rather than by editing the unit –
+  `systemctl --user edit a2a-agent@.service`, then `[Unit]` and
+  `ConditionHost=<host>*` – so that the same installation is a no-op
+  elsewhere.
 - `agents.toml.example` – seed for `~/.config/a2a-agents/agents.toml`: which
   CLI, which port, which adapter kind, plus per-agent extras.
 

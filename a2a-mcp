@@ -543,7 +543,7 @@ def build_server():
         """Spool a message into a local mailbox WITHOUT blocking — use it to
         deliver findings or progress to a leading session as they emerge
         (conventional recipients: "lead" for the orchestrating session,
-        "bronek" for the human), instead of saving everything for one final
+        "op" for the human operator), instead of saving everything for one final
         reply. One-way: at-least-once, no read receipt. sender defaults to
         your mesh identity (agent/context) when running as a mesh worker."""
         return do_spool(recipient, message, sender)
