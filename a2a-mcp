@@ -49,6 +49,7 @@ Configuration (~/.config/a2a-agents/agents.toml) and the API key are
 shared with a2a-agentd.
 """
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -193,10 +194,11 @@ def send_rpc(agent: str, context: str, message: str,
     except httpx.ReadTimeout:
         raise
     except httpx.HTTPError as err:
-        raise RuntimeError(f"{agent} daemon unreachable or failed: {err}")
-    except ValueError:
+        raise RuntimeError(
+            f"{agent} daemon unreachable or failed: {err}") from err
+    except ValueError as err:
         raise RuntimeError(f"{agent} port answered HTTP 200 with a non-JSON "
-                           f"body — probably not an a2a-agentd")
+                           f"body — probably not an a2a-agentd") from err
     if "error" in data:
         raise RuntimeError(f"A2A {data['error'].get('code')}: "
                            f"{data['error'].get('message')}")
@@ -216,7 +218,7 @@ def do_send(agent: str, context: str, message: str,
         return f"ERROR: {err}", True
     except httpx.HTTPError as err:
         return (f"ERROR: {agent} did not answer: "
-                f"{err or type(err).__name__}"), True
+                f"{str(err) or type(err).__name__}"), True
     native = meta.get("native_session_id")
     tail = f"\n\n[{agent} / context {context}" \
            + (f" / native session {native}]" if native else "]")
@@ -326,7 +328,7 @@ def agent_cli(argv: list[str], default_post: bool,
             die(str(err))
         except httpx.HTTPError as err:
             die(f"{agent} daemon did not answer: "
-                f"{err or type(err).__name__}")
+                f"{str(err) or type(err).__name__}")
         # It answered inside the grace period: either a refusal, or a turn
         # so short it finished already. Either way the caller should see it.
     else:
@@ -336,7 +338,7 @@ def agent_cli(argv: list[str], default_post: bool,
             die(str(err))
         except httpx.HTTPError as err:
             die(f"{agent} daemon did not answer: "
-                f"{err or type(err).__name__}")
+                f"{str(err) or type(err).__name__}")
     # One tail for both modes, so a generated context id and the native
     # session are never lost to the mode that happened to answer quickly.
     native = meta.get("native_session_id")
@@ -478,10 +480,8 @@ def do_check(recipient: str, wait: bool = False,
         p.unlink(missing_ok=True)
     for p in unreadable:
         # Dot-prefixed, so drains skip it; do_spool's sweep reaps it later.
-        try:
+        with contextlib.suppress(OSError):
             p.rename(p.with_name(f".bad-{p.name}"))
-        except OSError:
-            pass
     return text
 
 

@@ -179,7 +179,6 @@ class CliAdapter:
             return "\n".join(texts), sid
         raise ValueError(f"unknown adapter kind: {self.kind}")
 
-
     def error_hint(self, stdout: str, cli_only: bool = False) -> str:
         """The reason a CLI failed is not always on stderr. codex reports a
         usage limit as a JSON event on stdout and writes no stderr at all,
@@ -490,7 +489,7 @@ class CliAgentExecutor(AgentExecutor):
             except Exception as err:
                 raise RuntimeError(
                     f"cannot parse {cmd[0]} output ({err}); "
-                    f"stdout tail: {stdout[-300:]!r}")
+                    f"stdout tail: {stdout[-300:]!r}") from err
         native = parsed_id or native
         if not native:
             raise RuntimeError("could not determine native session id from output")
@@ -512,7 +511,7 @@ class CliAgentExecutor(AgentExecutor):
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(stdin_text.encode() if stdin_text else None),
                 timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # SIGKILL the whole process group, not just the CLI wrapper, so
             # tools the agent spawned do not outlive the failed turn. The
             # saved pid IS the pgid (start_new_session), and stays valid as
@@ -522,7 +521,7 @@ class CliAgentExecutor(AgentExecutor):
             except (ProcessLookupError, PermissionError):
                 proc.kill()
             await proc.wait()
-            raise RuntimeError(f"timed out after {timeout:.0f}s")
+            raise RuntimeError(f"timed out after {timeout:.0f}s") from None
         return (proc.returncode, stdout.decode(errors="replace"),
                 stderr.decode(errors="replace"))
 
