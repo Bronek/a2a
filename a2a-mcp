@@ -83,7 +83,13 @@ def die(msg: str) -> None:
 
 
 def load_conf() -> dict:
-    conf = tomllib.loads(CONFIG_FILE.read_text())
+    try:
+        conf = tomllib.loads(CONFIG_FILE.read_text())
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"{CONFIG_FILE} not found — `make install` creates it") from None
+    except tomllib.TOMLDecodeError as err:
+        raise RuntimeError(f"{CONFIG_FILE}: {err}") from err
     return {n: c for n, c in conf.items()
             if isinstance(c, dict) and "port" in c}
 
@@ -276,7 +282,10 @@ def agent_cli(argv: list[str], default_post: bool,
 
     posting = args.post or (default_post and not args.send)
 
-    conf = load_conf()
+    try:
+        conf = load_conf()
+    except RuntimeError as err:
+        die(str(err))
     # Resolve where the caller is, not where the daemon is: the daemon
     # would otherwise expand a relative path against its own cwd, which
     # under systemd is ~ and never the project the caller meant.
@@ -601,7 +610,8 @@ if __name__ == "__main__":
                      f"completed server-side; only the displayed reply was "
                      f"truncated")
         sys.exit(f"{name}: output cut off by the consumer")
-    except ValueError as err:
-        # Bad recipient names and a NaN timeout are usage errors; they
-        # deserve the usage treatment, not a traceback.
+    except (ValueError, RuntimeError) as err:
+        # Bad recipient names, a NaN timeout and a missing configuration
+        # are usage errors; they deserve the usage treatment, not a
+        # traceback.
         sys.exit(f"{Path(sys.argv[0]).name}: {err}")

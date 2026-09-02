@@ -90,7 +90,15 @@ def resolve_pass_env(mapping: dict[str, str]) -> dict[str, str]:
 class CliAdapter:
     """Build argv and parse output for one CLI flavour."""
 
+    KINDS = ("claude", "gemini", "codex", "kimi")
+
     def __init__(self, kind: str, command: str, extra_args: list[str]):
+        if kind not in self.KINDS:
+            # Checked here, at startup, rather than on the first turn: a
+            # daemon that starts cleanly and then fails every request is
+            # the worse way to learn about a typo in agents.toml.
+            raise ValueError(f"unknown adapter kind {kind!r} "
+                             f"(one of: {', '.join(self.KINDS)})")
         self.kind = kind
         self.command = command
         self.extra = extra_args
@@ -564,12 +572,31 @@ class KeyAuth:
         await self.app(scope, receive, send)
 
 
+def load_config() -> dict[str, dict]:
+    """The agent stanzas of agents.toml. A missing or unparsable file is
+    refused with a message rather than a traceback: the reason for a
+    daemon that will not start should be the last line of its log, not
+    buried in a stack trace that systemd retries five times."""
+    try:
+        conf = tomllib.loads(CONFIG_FILE.read_text())
+    except FileNotFoundError:
+        sys.exit(f"{CONFIG_FILE} not found — `make install` creates it")
+    except tomllib.TOMLDecodeError as err:
+        sys.exit(f"{CONFIG_FILE}: {err}")
+    return {n: c for n, c in conf.items() if isinstance(c, dict)}
+
+
 def main() -> None:
-    conf = tomllib.loads(CONFIG_FILE.read_text())
+    conf = load_config()
     if len(sys.argv) != 2 or sys.argv[1] not in conf:
         sys.exit(f"usage: a2a-agentd <agent>   (one of: {', '.join(conf)})")
     name = sys.argv[1]
     cfg = conf[name]
+    # Only this daemon's own stanza has to be sound; a broken neighbour is
+    # that neighbour's problem.
+    for key in ("kind", "port"):
+        if key not in cfg:
+            sys.exit(f"{CONFIG_FILE}: [{name}] has no {key}")
     port = cfg["port"]
 
     card = AgentCard(
@@ -589,9 +616,12 @@ def main() -> None:
             description="Send a prompt; the wrapped CLI agent replies. "
                         "Reuse contextId to continue a conversation.")],
     )
+    try:
+        executor = CliAgentExecutor(name, cfg)
+    except ValueError as err:
+        sys.exit(f"{CONFIG_FILE}: [{name}] {err}")
     handler = DefaultRequestHandler(
-        agent_executor=CliAgentExecutor(name, cfg),
-        task_store=InMemoryTaskStore())
+        agent_executor=executor, task_store=InMemoryTaskStore())
     app = A2AStarletteApplication(agent_card=card, http_handler=handler).build()
     log(f"{name}-worker listening on 127.0.0.1:{port}")
     uvicorn.run(KeyAuth(app, load_or_create_key()),
