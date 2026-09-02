@@ -145,6 +145,10 @@ all this.
 
 ## Install
 
+Needed first: [uv](https://docs.astral.sh/uv/), a `systemd --user` session,
+and whichever of the four CLIs the mesh should wrap, each installed and
+logged in. Then
+
 ```
 make install
 ```
@@ -155,9 +159,17 @@ exist yet; an existing configuration is never touched. The first daemon start
 resolves the Python dependencies (network needed once) and generates the
 shared API key.
 
+Updating is the same command again, followed by
+`systemctl --user restart 'a2a-agent@*'`: a running daemon keeps the code
+it started with, while the client picks a change up on its next
+invocation.
+
 Because an existing configuration is preserved, a setting can outlive the
 release that read it. The daemon logs a line when it finds an obsolete key
 rather than ignoring it silently.
+
+`make uninstall` removes the scripts and the unit again, and leaves the
+configuration, the key and the state alone.
 
 ## Usage
 

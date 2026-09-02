@@ -1,1 +1,3 @@
 .memsearch/
+# Claude Code's per-user project settings; the shared ones live in .claude/
+.claude/settings.local.json

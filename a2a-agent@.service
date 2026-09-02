@@ -2,7 +2,6 @@
 Description=A2A agent daemon (%i)
 # Shared home: the A2A agent mesh runs only on gdansk.
 ConditionHost=gdansk*
-After=network.target
 # RestartSec=3 alone never trips the default 5-per-10s start limit, so a
 # permanent failure (bad config, occupied port) would crash-loop forever;
 # widen the window so systemd gives up after five failures in a minute.
@@ -10,6 +9,10 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
+# exec, not the default simple: a start whose execve fails (the script
+# missing after a botched install) is then reported as a failed start
+# rather than a success followed by a crash.
+Type=exec
 ExecStartPre=/usr/bin/mkdir -p %h/.local/state/a2a-agents
 # Self-applying privacy migration: UMask only protects newly created files,
 # pre-hardening state/logs would otherwise stay world-readable.
