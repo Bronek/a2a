@@ -594,6 +594,35 @@ def load_config() -> dict[str, dict]:
     return {n: c for n, c in conf.items() if isinstance(c, dict)}
 
 
+def agent_card(name: str, cfg: dict) -> AgentCard:
+    """What anonymous discovery serves: the endpoint, the key scheme it
+    demands, and the one skill with its workdir contract."""
+    return AgentCard(
+        name=f"{name}-worker",
+        description=f"Local A2A wrapper around the `{cfg.get('command', name)}` "
+                    f"CLI (adapter: {cfg['kind']})",
+        url=f"http://127.0.0.1:{cfg['port']}",
+        version="1.0.0",
+        capabilities=AgentCapabilities(streaming=False),
+        default_input_modes=["text/plain"],
+        default_output_modes=["text/plain"],
+        security_schemes={"apiKey": SecurityScheme.model_validate(
+            {"type": "apiKey", "name": "X-API-Key", "in": "header"})},
+        security=[{"apiKey": []}],
+        skills=[AgentSkill(
+            id="chat", name="chat", tags=["cli", cfg["kind"]],
+            # The card is the one place a generic client learns the
+            # contract before its first message is refused.
+            description="Send a prompt; the wrapped CLI agent replies. "
+                        "Reuse contextId to continue a conversation. A new "
+                        "contextId must carry message metadata "
+                        '{"workdir": "/absolute/path"}: the directory the '
+                        "agent runs in, pinned for the life of the context.",
+            examples=['{"workdir": "/home/me/project"} as metadata on the '
+                      "first message of a context"])],
+    )
+
+
 def main() -> None:
     conf = load_config()
     if len(sys.argv) != 2 or sys.argv[1] not in conf:
@@ -606,31 +635,14 @@ def main() -> None:
         if key not in cfg:
             sys.exit(f"{CONFIG_FILE}: [{name}] has no {key}")
     port = cfg["port"]
-
-    card = AgentCard(
-        name=f"{name}-worker",
-        description=f"Local A2A wrapper around the `{cfg.get('command', name)}` "
-                    f"CLI (adapter: {cfg['kind']})",
-        url=f"http://127.0.0.1:{port}",
-        version="1.0.0",
-        capabilities=AgentCapabilities(streaming=False),
-        default_input_modes=["text/plain"],
-        default_output_modes=["text/plain"],
-        security_schemes={"apiKey": SecurityScheme.model_validate(
-            {"type": "apiKey", "name": "X-API-Key", "in": "header"})},
-        security=[{"apiKey": []}],
-        skills=[AgentSkill(
-            id="chat", name="chat", tags=["cli", cfg["kind"]],
-            description="Send a prompt; the wrapped CLI agent replies. "
-                        "Reuse contextId to continue a conversation.")],
-    )
     try:
         executor = CliAgentExecutor(name, cfg)
     except ValueError as err:
         sys.exit(f"{CONFIG_FILE}: [{name}] {err}")
     handler = DefaultRequestHandler(
         agent_executor=executor, task_store=InMemoryTaskStore())
-    app = A2AStarletteApplication(agent_card=card, http_handler=handler).build()
+    app = A2AStarletteApplication(agent_card=agent_card(name, cfg),
+                                  http_handler=handler).build()
     log(f"{name}-worker listening on 127.0.0.1:{port}")
     uvicorn.run(KeyAuth(app, load_or_create_key()),
                 host="127.0.0.1", port=port, log_level="warning")
