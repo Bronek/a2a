@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import traceback
 import uuid
 from pathlib import Path
 
@@ -44,7 +45,9 @@ STATE_DIR = Path.home() / ".local/state/a2a-agents"
 
 
 def log(msg: str) -> None:
-    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+    # Dated: the log files are never rotated, so a bare clock time stops
+    # meaning anything after the first midnight.
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
 
 
 def load_or_create_key() -> str:
@@ -352,7 +355,12 @@ class CliAgentExecutor(AgentExecutor):
                                                     req_workdir)
             meta = {"agent": self.name, "native_session_id": native}
         except Exception as err:
-            log(f"[{ctx_id!r}] FAILED: {err}")
+            # A RuntimeError is a refusal this file raised on purpose, and
+            # its message is the whole story. Anything else is a bug, and
+            # the traceback is the only way to find it afterwards.
+            trace = ("" if isinstance(err, RuntimeError)
+                     else "\n" + traceback.format_exc().rstrip())
+            log(f"[{ctx_id!r}] FAILED: {err}{trace}")
             reply = f"ERROR from {self.name} worker: {err}"
             meta = {"agent": self.name, "error": True}
         msg = new_agent_text_message(reply, context_id=ctx_id,
