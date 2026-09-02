@@ -269,9 +269,12 @@ and `uv run` creates `.venv/` from it on first use (the scripts never
 touch it). `make test` runs the unit tests – the adapters, the session
 state and its recovery paths, the auth middleware, the client and the
 mailbox, all with the CLIs and the daemons faked, so nothing on the mesh
-is needed or disturbed. `make lint` runs ruff; `make check` runs both. A
-test also holds the inline script metadata and the project file to the
-same dependency list, so the two cannot drift apart unnoticed.
+is needed or disturbed. `make lint` runs ruff; `make check` runs both,
+and refuses to run on a stale `uv.lock` – after changing a dependency,
+`uv lock` brings it up to date. A test holds the inline script metadata
+and the project file to the same dependency list, and another runs each
+script once in the environment its own header resolves, so a dependency
+missing from a header cannot hide behind the project environment.
 
 ## Limitations
 

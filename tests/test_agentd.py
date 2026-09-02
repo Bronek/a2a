@@ -398,7 +398,7 @@ def test_gemini_is_trusted_only_inside_trusted_workdirs(agentd, dirs):
     ex._invoke = FakeCli(
         (0, json.dumps({"response": "a", "sessionId": "s"}), ""),
         (0, json.dumps({"response": "b", "sessionId": "s"}), ""))
-    run(ex, "inside", "hello", str(dirs.real / "."))
+    run(ex, "inside", "hello", str(dirs.real) + "/.")
     run(ex, "outside", "hello", str(dirs.other))
     inside, outside = ex._invoke.calls
     assert "--skip-trust" in inside.cmd
@@ -426,7 +426,7 @@ def test_invoke_captures_both_streams(agentd, home):
 def test_invoke_timeout_kills_the_whole_process_group(agentd, home):
     pidfile = home / "pid"
     cmd = ["sh", "-c", f"sleep 30 & echo $! > {pidfile}; wait"]
-    with pytest.raises(RuntimeError, match="timed out after 0s"):
+    with pytest.raises(RuntimeError, match=r"timed out after 0\.5s"):
         asyncio.run(executor(agentd)._invoke(cmd, None, os.environ.copy(),
                                              0.5, str(home)))
     grandchild = int(pidfile.read_text())
@@ -531,8 +531,8 @@ def test_agent_card_is_anonymous(agentd):
     app = agentd.KeyAuth(inner, "sekrit")
     for path in agentd.KeyAuth.OPEN_PATHS:
         assert asgi(app, http("GET", path))[0]["status"] == 200
+        assert asgi(app, http("POST", path))[0]["status"] == 401
     assert len(inner.scopes) == 2
-    assert asgi(app, http("POST", path))[0]["status"] == 401
 
 
 def test_non_http_is_denied_and_lifespan_passes(agentd):
@@ -602,10 +602,48 @@ def test_main_refuses_a_bad_configuration(agentd, home, monkeypatch):
         ("[kimi]\nport = 1\n", r"\[kimi\] has no kind"),
         ("[kimi]\nkind = \"llama\"\nport = 1\n",
          r"\[kimi\] unknown adapter kind 'llama'"),
+        ("[kimi]\nkind = \"kimi\"\nport = \"8004\"\n",
+         r"\[kimi\] port must be an integer from 1 to 65535, not '8004'"),
+        ("[kimi]\nkind = \"kimi\"\nport = 99999\n", "port must be an integer"),
+        ("[kimi]\nkind = \"kimi\"\nport = true\n", "port must be an integer"),
+        ("[kimi]\nkind = \"kimi\"\nport = 1\ntimeout = \"30\"\n",
+         "timeout must be a positive number"),
+        ("[kimi]\nkind = \"kimi\"\nport = 1\ntimeout = 0\n",
+         "timeout must be a positive number"),
+        ("[kimi]\nkind = \"kimi\"\nport = 1\nextra_args = \"--x\"\n",
+         "extra_args must be a list of strings"),
+        ("[kimi]\nkind = \"kimi\"\nport = 1\ntrusted_workdirs = \"~\"\n",
+         "trusted_workdirs must be a list of strings"),
+        ("[kimi]\nkind = \"kimi\"\nport = 1\ncommand = 4\n",
+         "command must be a string"),
+        ("[kimi]\nkind = \"kimi\"\nport = 1\nenv_from_pass = \"x\"\n",
+         "env_from_pass must map"),
     ]:
         agentd.CONFIG_FILE.write_text(text)
         with pytest.raises(SystemExit, match=message):
             agentd.main()
+
+
+def test_execute_logs_a_traceback_for_a_parse_failure(agentd, dirs, capsys):
+    """Wrapped as a RuntimeError, but not a TurnFailed: the traceback says
+    where in parse() the CLI's output stopped matching."""
+    ex = executor(agentd)
+    ex._invoke = FakeCli((0, "[]", ""))
+    text, meta = a2a_call(ex, {"workdir": str(dirs.real)})
+    assert meta["error"] and "cannot parse claude output" in text
+    out = capsys.readouterr().out
+    assert "Traceback" in out and "AttributeError" in out
+    # Every physical line is dated, the traceback's included.
+    assert all(line[:4] == "20" + line[2:4] and line[10] == " "
+               for line in out.splitlines() if line)
+
+
+def test_execute_logs_no_traceback_for_a_refusal(agentd, dirs, capsys):
+    ex = executor(agentd)
+    ex._invoke = FakeCli((1, "", "boom"))
+    text, meta = a2a_call(ex, {"workdir": str(dirs.real)})
+    assert meta["error"] and "exited 1" in text
+    assert "Traceback" not in capsys.readouterr().out
 
 
 def test_execute_logs_a_traceback_for_a_bug(agentd, dirs, capsys):
@@ -631,6 +669,9 @@ def test_agent_card_declares_the_contract(agentd):
     assert (scheme.type, scheme.name, scheme.in_.value) == (
         "apiKey", "X-API-Key", "header")
     assert not card.capabilities.streaming
+    [ext] = card.capabilities.extensions
+    assert ext.uri == agentd.WORKDIR_EXTENSION and ext.required
+    assert '{"workdir": "/absolute/path"}' in ext.description
     [skill] = card.skills
     assert '{"workdir": "/absolute/path"}' in skill.description
     assert "kimi" in skill.tags

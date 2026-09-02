@@ -81,6 +81,8 @@ def test_list_reports_each_daemon_without_sending_the_key(mcp, mesh,
     monkeypatch.setattr(mcp.httpx, "get", fake_get)
     assert mcp.do_list() == ("claude (port 18002): DOWN\n"
                              "kimi (port 18004): up — kimi worker")
+    mcp.CONFIG_FILE.write_text('[kimi]\nkind = "kimi"\nport = "8004"\n')
+    assert mcp.do_list() == "kimi: port must be an integer, not '8004'"
 
 
 # --- send_rpc, against a mock daemon --------------------------------------
@@ -176,6 +178,15 @@ def test_send_rpc_errors(mcp, daemon):
         daemon.respond = respond
         with pytest.raises(exc, match=match):
             mcp.send_rpc("kimi", "ctx", "hello")
+
+
+def test_send_rpc_refuses_a_mistyped_stanza(mcp, mesh):
+    mcp.CONFIG_FILE.write_text(
+        '[kimi]\nkind = "kimi"\nport = "8004"\n'
+        '[claude]\nkind = "claude"\nport = 8002\ntimeout = "30"\n')
+    for agent in ("kimi", "claude"):
+        with pytest.raises(RuntimeError, match=rf"\[{agent}\] port must be"):
+            mcp.send_rpc(agent, "ctx", "hello")
 
 
 def test_send_rpc_needs_a_known_agent_and_a_key(mcp, mesh):
@@ -320,8 +331,15 @@ def test_cli_transport_failures_die_with_the_cause(mcp, rpc):
     with pytest.raises(SystemExit, match="api-key not found"):
         mcp.agent_cli(["-c", "kimi/ctx", "hi"], default_post=False)
     rpc.raises = httpx.ConnectError("refused")
-    with pytest.raises(SystemExit, match="kimi daemon did not answer"):
+    with pytest.raises(SystemExit, match="kimi daemon did not answer: refused"):
         mcp.agent_cli(["-c", "kimi/ctx", "hi"], default_post=False)
+    # An httpx error with an empty message falls back to its class name,
+    # on the waiting and the posting path alike.
+    rpc.raises = httpx.ConnectError("")
+    for post in (False, True):
+        with pytest.raises(SystemExit,
+                           match="kimi daemon did not answer: ConnectError"):
+            mcp.agent_cli(["-c", "kimi/ctx", "hi"], default_post=post)
 
 
 def test_post_returns_once_the_turn_is_queued(mcp, rpc, capsys):
@@ -463,7 +481,7 @@ def test_check_quarantines_unreadable_entries(mcp, home):
 def test_watch_honours_a_zero_timeout(mcp, home):
     t0 = time.monotonic()
     assert mcp.do_check("lead", wait=True, timeout=0) == "no mail for lead"
-    assert time.monotonic() - t0 < 1.5
+    assert time.monotonic() - t0 < 0.5
 
 
 def test_watch_wakes_on_mail(mcp, home):
@@ -548,7 +566,7 @@ def test_mcp_tools_and_their_hints(mcp):
         "list_agents": (True, False, True, False),
         "send": (False, True, False, True),
         "spool": (False, False, False, False),
-        "check_mail": (False, True, True, False),
+        "check_mail": (False, True, False, False),
     }
     schema = tools["send"].input_schema
     assert schema["required"] == ["agent", "context", "message"]

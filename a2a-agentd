@@ -36,18 +36,35 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill, SecurityScheme
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentExtension,
+    AgentSkill,
+    SecurityScheme,
+)
 from a2a.utils import new_agent_text_message
 
 CONFIG_FILE = Path.home() / ".config/a2a-agents/agents.toml"
 KEY_FILE = Path.home() / ".config/a2a-agents/api-key"
 STATE_DIR = Path.home() / ".local/state/a2a-agents"
+# Identifies, in the agent card, the one thing a generic A2A client has to
+# know that the protocol does not say: the workdir a new context must pin.
+WORKDIR_EXTENSION = "urn:x-a2a-mesh:workdir"
 
 
 def log(msg: str) -> None:
-    # Dated: the log files are never rotated, so a bare clock time stops
-    # meaning anything after the first midnight.
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+    # Dated, every physical line: the log files are never rotated, so a
+    # bare clock time stops meaning anything after the first midnight.
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print("\n".join(f"{stamp} {line}" for line in msg.splitlines()),
+          flush=True)
+
+
+class TurnFailed(RuntimeError):
+    """A failure this file diagnosed itself — a refusal, a timeout, a CLI
+    that exited non-zero. Its message is the whole story, so the log gets
+    no traceback for it; any other exception is a bug and gets one."""
 
 
 def load_or_create_key() -> str:
@@ -81,13 +98,41 @@ def resolve_pass_env(mapping: dict[str, str]) -> dict[str, str]:
         res = subprocess.run(["pass", "show", entry],
                              capture_output=True, text=True, timeout=30)
         if res.returncode != 0:
-            raise RuntimeError(
+            raise TurnFailed(
                 f"pass show {entry} failed: {res.stderr.strip() or 'no output'}")
         secret = res.stdout.splitlines()[0].strip() if res.stdout else ""
         if not secret:
-            raise RuntimeError(f"pass entry {entry} is empty")
+            raise TurnFailed(f"pass entry {entry} is empty")
         env[var] = secret
     return env
+
+
+def check_stanza(cfg: dict) -> None:
+    """Refuse the type errors TOML makes easy — port = "8001", timeout =
+    "30", extra_args = "--flag" — at startup, with the key named. Left
+    alone, the first two surface as tracebacks deep in uvicorn or in
+    every turn's wait_for, and the third splats one flag into its
+    characters on the CLI's command line."""
+    port = cfg["port"]
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
+        raise ValueError(f"port must be an integer from 1 to 65535, not {port!r}")
+    timeout = cfg.get("timeout", 1800)
+    if (isinstance(timeout, bool) or not isinstance(timeout, int | float)
+            or timeout <= 0):
+        raise ValueError(
+            f"timeout must be a positive number of seconds, not {timeout!r}")
+    command = cfg.get("command", "")
+    if not isinstance(command, str):
+        raise ValueError(f"command must be a string, not {command!r}")
+    for key in ("extra_args", "trusted_workdirs"):
+        val = cfg.get(key, [])
+        if not (isinstance(val, list) and all(isinstance(v, str) for v in val)):
+            raise ValueError(f"{key} must be a list of strings, not {val!r}")
+    env = cfg.get("env_from_pass", {})
+    if not (isinstance(env, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in env.items())):
+        raise ValueError(
+            f"env_from_pass must map variable names to pass entries, not {env!r}")
 
 
 class CliAdapter:
@@ -229,6 +274,7 @@ class CliAdapter:
 
 class CliAgentExecutor(AgentExecutor):
     def __init__(self, name: str, cfg: dict):
+        check_stanza(cfg)
         self.name = name
         self.cfg = cfg
         self.adapter = CliAdapter(cfg["kind"], cfg.get("command", name),
@@ -355,10 +401,10 @@ class CliAgentExecutor(AgentExecutor):
                                                     req_workdir)
             meta = {"agent": self.name, "native_session_id": native}
         except Exception as err:
-            # A RuntimeError is a refusal this file raised on purpose, and
-            # its message is the whole story. Anything else is a bug, and
-            # the traceback is the only way to find it afterwards.
-            trace = ("" if isinstance(err, RuntimeError)
+            # A parse failure counts as a bug here even though it arrives
+            # wrapped: the traceback says where in parse() the CLI's output
+            # stopped matching, which its message alone cannot.
+            trace = ("" if isinstance(err, TurnFailed)
                      else "\n" + traceback.format_exc().rstrip())
             log(f"[{ctx_id!r}] FAILED: {err}{trace}")
             reply = f"ERROR from {self.name} worker: {err}"
@@ -375,7 +421,7 @@ class CliAgentExecutor(AgentExecutor):
         they run in, so moving a conversation would orphan its session."""
         if requested is not None and not (isinstance(requested, str)
                                           and requested.strip()):
-            raise RuntimeError("workdir metadata must be a non-empty string")
+            raise TurnFailed("workdir metadata must be a non-empty string")
         # Resolved: the pin is compared lexically (here and against
         # trusted_workdirs), so ".." components, symlinks and relative paths
         # must be flattened before they mean anything. Resolving also makes
@@ -386,18 +432,18 @@ class CliAgentExecutor(AgentExecutor):
         if pinned:
             pinned = str(Path(pinned).expanduser().resolve())
             if req and req != pinned:
-                raise RuntimeError(
+                raise TurnFailed(
                     f"context {ctx_id!r} is pinned to workdir {pinned}; for "
                     f"{req} use a new context name (a new conversation)")
             return pinned
         if not req:
-            raise RuntimeError(
+            raise TurnFailed(
                 f"context {ctx_id!r} has no pinned workdir; set one on its "
                 'first message — metadata {"workdir": "/path"} via '
                 "a2a-send --workdir (or --here), a2a-mcp send(..., workdir=...), or "
                 "A2A Inspector's Message Metadata field")
         if not Path(req).is_dir():
-            raise RuntimeError(f"workdir {req} is not an existing directory")
+            raise TurnFailed(f"workdir {req} is not an existing directory")
         return req
 
     async def run_turn(self, ctx_id: str, prompt: str,
@@ -498,7 +544,7 @@ class CliAgentExecutor(AgentExecutor):
                     # Neither stream said anything usable; the tail of stdout
                     # beats reporting an empty string.
                     detail = stdout.strip()[-300:] or "no output on either stream"
-                raise RuntimeError(
+                raise TurnFailed(
                     f"{cmd[0]} exited {rc} after {dt:.0f}s: {detail[:500]!r}")
             try:
                 text, parsed_id = self.adapter.parse(stdout, lm.name)
@@ -508,7 +554,7 @@ class CliAgentExecutor(AgentExecutor):
                     f"stdout tail: {stdout[-300:]!r}") from err
         native = parsed_id or native
         if not native:
-            raise RuntimeError("could not determine native session id from output")
+            raise TurnFailed("could not determine native session id from output")
         if (entry is None or entry.get("session") != native
                 or entry.get("workdir") != workdir):
             self.sessions[ctx_id] = {"session": native, "workdir": workdir}
@@ -537,7 +583,7 @@ class CliAgentExecutor(AgentExecutor):
             except (ProcessLookupError, PermissionError):
                 proc.kill()
             await proc.wait()
-            raise RuntimeError(f"timed out after {timeout:.0f}s") from None
+            raise TurnFailed(f"timed out after {timeout:g}s") from None
         return (proc.returncode, stdout.decode(errors="replace"),
                 stderr.decode(errors="replace"))
 
@@ -603,7 +649,16 @@ def agent_card(name: str, cfg: dict) -> AgentCard:
                     f"CLI (adapter: {cfg['kind']})",
         url=f"http://127.0.0.1:{cfg['port']}",
         version="1.0.0",
-        capabilities=AgentCapabilities(streaming=False),
+        capabilities=AgentCapabilities(streaming=False, extensions=[
+            # The spec's mechanism for a requirement a client must honour;
+            # the skill description repeats it in prose for the humans.
+            AgentExtension(
+                uri=WORKDIR_EXTENSION, required=True,
+                description="A new contextId must carry message metadata "
+                            '{"workdir": "/absolute/path"}: the directory '
+                            "the agent runs in, pinned for the life of the "
+                            "context; a different directory needs a new "
+                            "contextId.")]),
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         security_schemes={"apiKey": SecurityScheme.model_validate(
@@ -617,9 +672,7 @@ def agent_card(name: str, cfg: dict) -> AgentCard:
                         "Reuse contextId to continue a conversation. A new "
                         "contextId must carry message metadata "
                         '{"workdir": "/absolute/path"}: the directory the '
-                        "agent runs in, pinned for the life of the context.",
-            examples=['{"workdir": "/home/me/project"} as metadata on the '
-                      "first message of a context"])],
+                        "agent runs in, pinned for the life of the context.")],
     )
 
 

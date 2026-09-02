@@ -8,7 +8,10 @@ version = "0"
 description = "A local mesh of agent CLIs, wrapped as A2A servers"
 requires-python = ">=3.11"
 # Mirrors the inline metadata of the two scripts; tests/test_metadata.py
-# fails when the two drift apart.
+# fails when the two drift apart. Each ceiling is the next major. For the
+# two packages still at 0.x that is a judgement rather than semver, whose
+# 0.y series promise nothing: their minors have been compatible for years,
+# and 1.0 is the announced break.
 dependencies = [
     "a2a-sdk[http-server]>=0.3,<0.4",
     "uvicorn>=0.30,<1",
