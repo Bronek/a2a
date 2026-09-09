@@ -1,11 +1,17 @@
-BIN_DIR  := $(HOME)/.local/bin
-UNIT_DIR := $(HOME)/.config/systemd/user
-CONF_DIR := $(HOME)/.config/a2a-agents
+BIN_DIR   := $(HOME)/.local/bin
+UNIT_DIR  := $(HOME)/.config/systemd/user
+CONF_DIR  := $(HOME)/.config/a2a-agents
+STATE_DIR := $(HOME)/.local/state/a2a-agents
 
 .PHONY: install uninstall test lint check
 
+# STATE_DIR must exist before the first daemon start: systemd opens the
+# unit's append: log target ahead of every ExecStartPre, so the unit
+# cannot create the directory for itself (nor can StateDirectory=, which
+# is set up after output redirection).
 install:
 	install -d "$(BIN_DIR)" "$(UNIT_DIR)" "$(CONF_DIR)"
+	install -d -m 0700 "$(STATE_DIR)"
 	install -m 0755 a2a-agentd a2a-mcp "$(BIN_DIR)/"
 # a2a-send and a2a-post are a2a-mcp under other names: the script reads
 # its own invocation name to pick the waiting or fire-and-forget mode.

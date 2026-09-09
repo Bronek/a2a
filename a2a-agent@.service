@@ -15,7 +15,6 @@ StartLimitBurst=5
 # missing after a botched install) is then reported as a failed start
 # rather than a success followed by a crash.
 Type=exec
-ExecStartPre=/usr/bin/mkdir -p %h/.local/state/a2a-agents
 # Self-applying privacy migration: UMask only protects newly created files,
 # pre-hardening state/logs would otherwise stay world-readable.
 ExecStartPre=/usr/bin/chmod -R go-rwx %h/.local/state/a2a-agents
@@ -26,6 +25,9 @@ UMask=0077
 # Files rather than the journal: not every host lets this user read
 # journalctl, and a plain file can be tailed anywhere:
 #   tail -f ~/.local/state/a2a-agents/<agent>.log
+# The directory is created by `make install`; it must exist before the
+# unit starts, because systemd opens append: targets before any
+# ExecStartPre runs (a missing parent fails the start with 209/STDOUT).
 StandardOutput=append:%h/.local/state/a2a-agents/%i.log
 StandardError=append:%h/.local/state/a2a-agents/%i.log
 Restart=on-failure
