@@ -1,6 +1,6 @@
 ---
 name: a2a-review
-description: Run a cross-lab review using the local A2A mesh agents (codex, kimi, gemini) as independent reviewers. Use when asked to have the mesh review a repo, branch, or piece of work, or to "ask the other agents" for their opinion on changes.
+description: Run a cross-lab review using the local A2A mesh agents (codex, kimi, gemini, glm) as independent reviewers. Use when asked to have the mesh review a repo, branch, or piece of work, or to "ask the other agents" for their opinion on changes.
 ---
 
 # Cross-lab review over the A2A mesh

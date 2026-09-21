@@ -1,12 +1,12 @@
 # The A2A mesh — how to talk to the other agents
 
-This machine runs agent CLIs from several labs (claude, gemini, codex, kimi)
-wrapped as A2A daemons on loopback ports. You can converse with any of them
-through the `a2a` MCP server — tools `list_agents` and `send` — or, given
-shell access, the same operations as a CLI: `a2a-mcp list` and
-`a2a-send -c <agent>[/<context>] [--workdir DIR] <message>` — a single
-`-` as the message reads it from stdin, verbatim (`a2a-mcp
-send …` is the same command under its universal name).
+This machine runs agent CLIs from several labs (claude, gemini, codex, kimi,
+and glm through cline) wrapped as A2A daemons on loopback ports. You can
+converse with any of them through the `a2a` MCP server — tools `list_agents`
+and `send` — or, given shell access, the same operations as a CLI: `a2a-mcp
+list` and `a2a-send -c <agent>[/<context>] [--workdir DIR] <message>` — a
+single `-` as the message reads it from stdin, verbatim (`a2a-mcp send …` is
+the same command under its universal name).
 
 Rules that matter:
 

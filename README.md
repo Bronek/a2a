@@ -1,10 +1,10 @@
 # a2a – a local mesh of agent CLIs
 
-Agent CLIs from several labs, each wrapped as an [A2A](https://a2a-protocol.org) server on a loopback port, so that a human at a shell or another agent can drive any of them the same way. Mixing labs is the point. Models with different training have different blind spots; where they agree, the agreement is worth more, and where they differ, the difference tells you something. Claude, Gemini, Codex and Kimi are supported. Each runs as its own daemon, started and watched on its own.
+Agent CLIs from several labs, each wrapped as an [A2A](https://a2a-protocol.org) server on a loopback port, so that a human at a shell or another agent can drive any of them the same way. Mixing labs is the point. Models with different training have different blind spots; where they agree, the agreement is worth more, and where they differ, the difference tells you something. Claude, Gemini, Codex and Kimi are supported, and GLM through the cline CLI. Each runs as its own daemon, started and watched on its own.
 
 ## Components
 
-**`a2a-agentd <agent>`** wraps one CLI. It is a self-contained [uv](https://docs.astral.sh/uv/) script, its dependencies declared inline (PEP 723) with no virtualenv to manage, and it serves the A2A protocol, JSON-RPC `message/send`, on `127.0.0.1:<port>`. The work itself goes to the CLI in non-interactive mode.
+**`a2a-agentd <agent>`** wraps one CLI. It is a self-contained [uv](https://docs.astral.sh/uv/) script, its dependencies declared inline (PEP 723) with no virtualenv to manage, and it serves the A2A protocol, JSON-RPC `message/send`, on `127.0.0.1:<port>`. The work itself goes to the CLI in non-interactive mode, or, for cline, over its Agent Client Protocol on stdio.
 
 **`a2a-mcp`** is the client: one script under three names. Run with no arguments it is a stdio MCP server that exposes the mesh as tools, `list_agents` and `send`, so any MCP-capable agent CLI can drive the mesh through its native tool calling, under its own permission model, with no shell escape and no loosened sandbox. The same operations double as a CLI, `a2a-mcp list`, `a2a-mcp send` and the mailbox verbs below, for humans and for agents that have a shell but no MCP client. Registering the bridge with each CLI, and the approval settings a headless worker needs before it may call these tools, are in [Permissions and configuration](#permissions-and-configuration).
 
@@ -30,6 +30,7 @@ The bridge has to be registered with each CLI, and each CLI then has to be told 
 | **gemini** | `gemini mcp add -s user a2a a2a-mcp` | `"trust": true` on the `a2a` server in `~/.gemini/settings.json`, plus `extra_args = ["--allowed-mcp-server-names", "a2a"]` |
 | **codex** | `codex mcp add a2a -- a2a-mcp` | `extra_args = ["--approve-for-me", "--disable", "apps"]` |
 | **kimi** | `~/.kimi-code/mcp.json` (no `mcp` subcommand) | `[[permission.rules]]` with `decision = "allow"`, `pattern = "mcp__a2a__*"` in `~/.kimi-code/config.toml` |
+| **glm** (cline) | `cline mcp install --yes a2a -- a2a-mcp` | `extra_args = ["--auto-approve", "true"]` |
 
 `extra_args` means the agent's stanza in `~/.config/a2a-agents/agents.toml`. Registration is at user scope throughout, so the bridge loads in any working directory and no project needs its own `.mcp.json`. This repository carries one anyway, for Claude Code sessions opened here; it finds `a2a-mcp` through `PATH`, so `make install` must have run.
 
@@ -39,6 +40,7 @@ Each grant is narrower or wider than it looks:
 - **gemini** needs the trust flag because headless `gemini` cannot answer an approval prompt. Set it globally, one edit that auto-approves the mesh tools in every directory gemini visits, or per project through a `.mcp.json` that limits the grant to the workspaces carrying it. Either is acceptable here: the tools only reach the local mesh, and the receiving workers keep their own permission gates, which is the boundary that matters.
 - **codex** is the awkward one. Headless `exec` pins `approval_policy` to `never`, which refuses anything needing approval rather than waving it through, MCP tool calls included. `--approve-for-me` routes approvals to codex's automatic reviewer instead, at the price of a workspace-write sandbox, and `--disable apps` strips the built-in ChatGPT-apps suite from a worker that has no use for it. Codex also scrubs the environment it hands MCP servers, so its spooled mail should name its `sender` explicitly.
 - **kimi** cannot answer prompts headless either, hence the allow rule. Its registration lives at user level so it loads without the workspace-trust prompt that a project-level `.kimi-code/mcp.json` would raise.
+- **glm** is the cline CLI on z.ai's model, driven over cline's Agent Client Protocol because its headless JSON mode cannot resume a session. ACP reads only `--acp` and `--auto-approve` from the command line, so the stanza chooses the provider and model through `env`, as `CLINE_PROVIDER` and `CLINE_MODEL`, and the provider's key through `env_from_pass`, as `CLINE_API_KEY`; the daemon refuses the flags that would silently pick some other model. Another model is another stanza of the same kind. Without auto-approval the daemon answers every permission request with a refusal, which leaves a worker that can only talk. Like codex, cline scrubs the environment it hands MCP servers, so its spooled mail should name its `sender`.
 
 ### What a headless worker can actually do
 
@@ -59,7 +61,7 @@ The `a2a-review` project skill teaches the review choreography on top of all thi
 
 ## Install
 
-You need [uv](https://docs.astral.sh/uv/), a `systemd --user` session, and whichever of the four CLIs the mesh should wrap, each installed and logged in. Then:
+You need [uv](https://docs.astral.sh/uv/), a `systemd --user` session, and whichever of the five CLIs the mesh should wrap, each installed and logged in. Then:
 
 ```
 make install
@@ -76,7 +78,7 @@ Because an existing configuration is preserved, a setting can outlive the releas
 ## Usage
 
 ```
-systemctl --user start a2a-agent@{claude,gemini,codex,kimi}
+systemctl --user start a2a-agent@{claude,gemini,codex,kimi,glm}
 a2a-mcp list
 a2a-send -c codex/review-42 --workdir ~/gits/proj "…"
                                                # one-shot; --workdir pins a
@@ -90,7 +92,7 @@ tail -f ~/.local/state/a2a-agents/claude.log   # progress of one agent
 
 ## Sessions
 
-Every A2A `contextId` maps to a native CLI session. A conversation therefore survives daemon restarts, and it can be opened directly in the CLI that owns it, `claude --resume <id>`, `kimi -r <id>` and so on; the client prints the native id. Claude and Gemini accept a caller-chosen session UUID, derived deterministically from the context id. Codex and Kimi mint their own, which the daemon captures from their JSON output. The mapping is persisted in `~/.local/state/a2a-agents/<agent>.json`. Turns within one context are serialised: concurrent requests to the same conversation queue rather than race.
+Every A2A `contextId` maps to a native CLI session. A conversation therefore survives daemon restarts, and it can be opened directly in the CLI that owns it, `claude --resume <id>`, `kimi -r <id>`, `cline --id <id>` and so on; the client prints the native id. Claude and Gemini accept a caller-chosen session UUID, derived deterministically from the context id. Codex, Kimi and cline mint their own, which the daemon captures from their output. The mapping is persisted in `~/.local/state/a2a-agents/<agent>.json`. Turns within one context are serialised: concurrent requests to the same conversation queue rather than race.
 
 A context also pins its working directory, on its first message and for life. Several CLIs scope their session stores to the directory they run in, so moving a conversation would orphan its session. A new context refuses to start without one. Pass it as message metadata `{"workdir": "/path"}`: `a2a-send --workdir`, or `--here` for the current directory; the `workdir` argument of the MCP `send` tool; or, in A2A Inspector, the Message Metadata field on the chat's first message. The client expands and resolves the path where you are, rather than at the daemon's own directory, which is `~` and not the project you meant. A relative path or symlink is therefore pinned to the resolved directory it identified when the context was created. A different directory means a new context name.
 
@@ -114,7 +116,7 @@ The scripts stay self-contained, but the checks need somewhere to run. `pyprojec
 
 - **Single-shot responses.** No streaming, no incremental task updates, and `tasks/cancel` is not implemented. A slow turn runs until it finishes or hits the per-agent timeout.
 - **Nothing is pruned.** Log files under `~/.local/state/a2a-agents/` grow without rotation, though at a line or two per task that takes a while to matter. The same goes for the context-to-session maps.
-- **Sessions can be lost by their owners.** The CLIs own their session stores: gemini expires old sessions, and kimi and claude scope theirs to a directory. When a resume fails for such a reason, the daemon starts a fresh native session under the same context and logs it. The conversation's history is gone; re-state what matters rather than assuming the agent remembers.
+- **Sessions can be lost by their owners.** The CLIs own their session stores: gemini expires old sessions, kimi and claude scope theirs to a directory, and cline's can be deleted from its history. When a resume fails for such a reason, the daemon starts a fresh native session under the same context and logs it. The conversation's history is gone; re-state what matters rather than assuming the agent remembers.
 - **Unbounded output buffering.** Subprocess output accumulates in memory, so a runaway CLI emitting gigabytes could exhaust its daemon.
 - **Mail can still be lost after it is handed over.** A drain gives the batch to its consumer before deleting anything, so a broken pipe or a dead reader leaves the mail in the box. An MCP tool result lost in transit after the call returns is lost for good; there is no acknowledgement protocol.
 - **Port squatting.** Status checks are anonymous, but a `message/send` presents the API key to whichever process holds the port. With a daemon down, a local process could bind its port and collect the key. A unix-socket transport would close this hole, and is future work.
