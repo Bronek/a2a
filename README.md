@@ -44,7 +44,7 @@ Each grant is narrower or wider than it looks:
 
 ### What a headless worker can actually do
 
-Measure it; do not read it off the flags. Each CLI decides for itself what "there is nobody to ask" means, and the four answers differ. Every row below was probed: each worker was asked to attempt a file read, a shell command, a file write and an MCP call, and to report each as succeeded or blocked. The results were then checked from outside, because a worker's account of its own powers is not evidence.
+Measure it; do not read it off the flags. Each CLI decides for itself what "there is nobody to ask" means, and the answers differ. Every row below was probed: each worker was asked to attempt a file read, a shell command, a file write and an MCP call, and to report each as succeeded or blocked. The results were then checked from outside, because a worker's account of its own powers is not evidence.
 
 | Agent | File read | Shell execution | File write | Mesh tools | Effective scope |
 |---|---|---|---|---|---|
@@ -52,8 +52,9 @@ Measure it; do not read it off the flags. Each CLI decides for itself what "ther
 | **kimi** | yes | yes | yes | yes | Unrestricted, and wider than the same CLI run interactively |
 | **codex** | yes | auto-reviewed | auto-reviewed | yes | Approvals go to an automatic reviewer, in a workspace-write sandbox |
 | **gemini** | yes | – | – | yes | No shell or write tool exists; read and mesh tools only |
+| **glm** | yes | yes | yes | yes | Unrestricted, including outside the pinned workdir |
 
-Two of the four can change anything you can, and `--allowedTools` does not alter that: it marks tools as pre-approved and fences off nothing. Codex alone has its writes both reviewed and confined to the workspace. Gemini alone cannot modify the tree it reads, which makes the weakest coder of the four the safest reviewer. Remember that when choosing who to point at a repository.
+Three of the five can change anything you can. `--allowedTools` does not alter that for claude: it marks tools as pre-approved and fences off nothing. Cline's auto-approval at least says what it does. Codex alone has its writes both reviewed and confined to the workspace. Gemini alone cannot modify the tree it reads, which makes the weakest coder of the five the safest reviewer. Remember that when choosing who to point at a repository.
 
 One trap when probing this yourself: in the claude worker the mesh tools are deferred, so a cold call fails with `InputValidationError` rather than a permission error. It reads exactly like a blocked tool, but the tool merely needs loading first.
 
