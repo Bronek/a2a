@@ -67,10 +67,29 @@ def test_kimi_prompt_travels_in_argv(agentd):
     assert argv[1:3] == ["-r", "s1"]
 
 
+def test_cline_argv_and_turn(agentd):
+    a = adapter(agentd, "cline", ["--auto-approve", "true"])
+    argv, turn = a.build("hello", None, resume=False, lastmsg="/lm")
+    assert argv == ["cline", "--acp", "--auto-approve", "true"]
+    assert turn == agentd.AcpTurn("hello", None)
+    _, turn = a.build("hello", "s1", resume=True, lastmsg="/lm")
+    assert turn == agentd.AcpTurn("hello", "s1")
+
+
+@pytest.mark.parametrize("flag", ["-P", "--provider", "-m", "--model",
+                                  "-k", "--key"])
+def test_cline_refuses_the_flags_its_acp_mode_ignores(agentd, flag):
+    with pytest.raises(ValueError, match=f"ignores {flag}.*CLINE_MODEL"):
+        adapter(agentd, "cline", [flag, "x"])
+    adapter(agentd, "cline", ["--thinking", "high"])  # other flags pass
+
+
 def test_prompts_go_through_stdin_except_for_kimi(agentd):
     for kind in ("claude", "gemini", "codex"):
         argv, stdin = adapter(agentd, kind).build("secret", "s", False, "/lm")
         assert stdin == "secret" and "secret" not in argv
+    argv, turn = adapter(agentd, "cline").build("secret", "s", False, "/lm")
+    assert turn.prompt == "secret" and "secret" not in argv
 
 
 def test_unknown_kind_is_refused_at_construction(agentd):
@@ -83,6 +102,7 @@ def test_who_chooses_the_session_id(agentd):
     assert not adapter(agentd, "gemini").chooses_own_id()
     assert adapter(agentd, "codex").chooses_own_id()
     assert adapter(agentd, "kimi").chooses_own_id()
+    assert adapter(agentd, "cline").chooses_own_id()
 
 
 # --- CliAdapter.parse ------------------------------------------------------
@@ -126,6 +146,37 @@ def test_parse_kimi(agentd):
     ])
     assert adapter(agentd, "kimi").parse(out, "/lm") == (
         "part one\npart two", "session_1")
+
+
+def rpc_result(rid, result):
+    return json.dumps({"jsonrpc": "2.0", "id": rid, "result": result})
+
+
+def rpc_note(update):
+    return json.dumps({"jsonrpc": "2.0", "method": "session/update",
+                       "params": {"sessionId": "c1", "update": update}})
+
+
+def chunk(text, kind="agent_message_chunk", ctype="text"):
+    return rpc_note({"sessionUpdate": kind,
+                     "content": {"type": ctype, "text": text}})
+
+
+def test_parse_cline(agentd):
+    out = "\n".join([
+        rpc_result(1, {"protocolVersion": 1}),
+        rpc_result(2, {"sessionId": "c1", "modes": {}}),
+        "[acp] not json",
+        chunk("po"),
+        chunk("hidden", kind="agent_thought_chunk"),
+        rpc_note({"sessionUpdate": "tool_call", "title": "read_files"}),
+        chunk("img", ctype="image"),
+        chunk("ng"),
+        rpc_result(3, {"stopReason": "end_turn"}),
+    ])
+    assert adapter(agentd, "cline").parse(out, "/lm") == ("pong", "c1")
+    # A resumed session's transcript names no id: the pinned one stands.
+    assert adapter(agentd, "cline").parse(chunk("x"), "/lm") == ("x", None)
 
 
 # --- CliAdapter.error_hint -------------------------------------------------
@@ -353,6 +404,39 @@ def test_lost_session_starts_a_fresh_one(agentd, dirs, capsys):
     assert "starting a fresh native session" in capsys.readouterr().out
 
 
+def cline_ok(text, sid=None):
+    lines = [rpc_result(2, {"sessionId": sid})] if sid else []
+    return 0, "\n".join([*lines, chunk(text)]), ""
+
+
+def test_cline_turns_are_acp_turns(agentd, dirs):
+    # Named after the model, not the CLI, so the stanza names the command.
+    ex = agentd.CliAgentExecutor("glm", {
+        "kind": "cline", "command": "cline", "port": 1,
+        "extra_args": ["--auto-approve", "true"]})
+    ex._invoke = FakeCli(cline_ok("hi", "c1"), cline_ok("again"))
+    assert run(ex, "ctx", "hello", str(dirs.real)) == ("hi", "c1")
+    assert run(ex, "ctx", "more") == ("again", "c1")
+    first, second = ex._invoke.calls
+    assert first.cmd == ["cline", "--acp", "--auto-approve", "true"]
+    assert first.stdin == agentd.AcpTurn("hello", None)
+    assert second.stdin == agentd.AcpTurn("more", "c1")
+    assert ex.sessions["ctx"] == {"session": "c1", "workdir": str(dirs.real)}
+
+
+def test_cline_lost_session_starts_a_fresh_one(agentd, dirs, capsys):
+    ex = agentd.CliAgentExecutor("glm", {"kind": "cline", "port": 1})
+    ex.sessions["ctx"] = {"session": "old", "workdir": str(dirs.real)}
+    gone = json.dumps({"jsonrpc": "2.0", "id": 2, "error": {
+        "code": -32002, "message": "Resource not found: old"}})
+    ex._invoke = FakeCli((1, gone, "session/load: Resource not found: old"),
+                         cline_ok("fresh", "c2"))
+    assert run(ex, "ctx", "hello") == ("fresh", "c2")
+    assert ex._invoke.calls[1].stdin == agentd.AcpTurn("hello", None)
+    assert ex.sessions["ctx"]["session"] == "c2"
+    assert "starting a fresh native session" in capsys.readouterr().out
+
+
 def test_model_text_cannot_orphan_a_session(agentd, dirs):
     """The retry matcher reads the CLI's own error fields only: a failed
     turn whose reply quotes the magic phrase must not repoint the context."""
@@ -449,6 +533,157 @@ def test_invoke_timeout_kills_the_whole_process_group(agentd, home):
         time.sleep(0.05)
     else:
         pytest.fail(f"grandchild {grandchild} survived the timeout")
+
+
+FAKE_ACP = r"""#!/usr/bin/env python3
+# A stand-in for `cline --acp`: JSON-RPC over stdio, one message per line.
+# FAKE_ACP in the environment selects a behaviour; it exits on stdin EOF.
+import json, os, sys, time
+
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+
+def note(sid, update):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": sid, "update": update}})
+
+def chunk(sid, text):
+    note(sid, {"sessionUpdate": "agent_message_chunk",
+               "content": {"type": "text", "text": text}})
+
+def ask(req):  # a request to the client; returns its answer
+    send(req)
+    return json.loads(sys.stdin.readline())
+
+mode = os.environ.get("FAKE_ACP", "")
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    m = json.loads(line)
+    method, rid, p = m["method"], m["id"], m.get("params", {})
+    if method == "initialize":
+        if mode == "die":
+            sys.stderr.write("Error: not authenticated\n")
+            sys.exit(3)
+        if mode == "hang":
+            time.sleep(30)
+        send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"sessionId": "fake-1", "modes": {}}})
+    elif method == "session/load":
+        sid = p["sessionId"]
+        if sid == "gone":
+            send({"jsonrpc": "2.0", "id": rid, "error": {
+                "code": -32002, "message": "Resource not found: gone"}})
+            continue
+        note(sid, {"sessionUpdate": "user_message_chunk",
+                   "content": {"type": "text", "text": "earlier question"}})
+        chunk(sid, "earlier answer")
+        send({"jsonrpc": "2.0", "id": rid, "result": {"modes": {}}})
+    elif method == "session/prompt":
+        sid, text = p["sessionId"], p["prompt"][0]["text"]
+        if mode == "permission":
+            ans = ask({"jsonrpc": "2.0", "id": 99,
+                       "method": "session/request_permission",
+                       "params": {"sessionId": sid, "toolCall": {},
+                                  "options": [
+                                      {"optionId": "y", "kind": "allow_once"},
+                                      {"optionId": "n", "kind": "reject_once"}]}})
+            chunk(sid, "permission " + ans["result"]["outcome"]["optionId"])
+        elif mode == "ask-fs":
+            ans = ask({"jsonrpc": "2.0", "id": 98, "method": "fs/read_text_file",
+                       "params": {"sessionId": sid, "path": "/etc/passwd"}})
+            chunk(sid, "fs " + ("refused" if "error" in ans else "granted"))
+        elif mode == "long":
+            chunk(sid, "x" * 200_000)
+        elif mode != "silent":
+            chunk(sid, "re: ")
+            chunk(sid, text)
+        note(sid, {"sessionUpdate": "tool_call", "title": "noise"})
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "stopReason": "refusal" if mode == "refuse" else "end_turn"}})
+sys.stderr.write("[fake acp] bye\n")
+"""
+
+
+@pytest.fixture
+def fake_acp(home):
+    script = home / "fake-cline"
+    script.write_text(FAKE_ACP)
+    script.chmod(0o755)
+    return script
+
+
+def acp(agentd, home, fake_acp, turn, mode="", timeout=10):
+    env = os.environ.copy()
+    env["FAKE_ACP"] = mode
+    ex = agentd.CliAgentExecutor("glm", {"kind": "cline", "port": 1})
+    rc, out, err = asyncio.run(ex._invoke([str(fake_acp), "--acp"], turn,
+                                          env, timeout, str(home)))
+    return rc, out, err, ex.adapter
+
+
+def test_acp_new_session_yields_the_reply_and_its_id(agentd, home, fake_acp):
+    rc, out, err, a = acp(agentd, home, fake_acp, agentd.AcpTurn("hello", None))
+    assert rc == 0 and err.strip() == "[fake acp] bye"
+    assert a.parse(out, "/lm") == ("re: hello", "fake-1")
+
+
+def test_acp_resume_keeps_replayed_history_out_of_the_reply(
+        agentd, home, fake_acp):
+    rc, out, _, a = acp(agentd, home, fake_acp, agentd.AcpTurn("more", "s1"))
+    assert rc == 0
+    assert a.parse(out, "/lm") == ("re: more", None)
+    assert "earlier" not in out
+
+
+def test_acp_lost_session_is_reported_for_the_retry(agentd, home, fake_acp):
+    rc, out, err, a = acp(agentd, home, fake_acp, agentd.AcpTurn("more", "gone"))
+    assert rc == 1
+    assert "Resource not found: gone" in err
+    assert a.error_hint(out, cli_only=True) == "Resource not found: gone"
+
+
+def test_acp_permission_requests_are_refused(agentd, home, fake_acp):
+    rc, out, _, a = acp(agentd, home, fake_acp, agentd.AcpTurn("go", None),
+                        mode="permission")
+    assert rc == 0 and a.parse(out, "/lm")[0] == "permission n"
+
+
+def test_acp_other_agent_requests_are_answered_not_ignored(
+        agentd, home, fake_acp):
+    rc, out, _, a = acp(agentd, home, fake_acp, agentd.AcpTurn("go", None),
+                        mode="ask-fs")
+    assert rc == 0 and a.parse(out, "/lm")[0] == "fs refused"
+
+
+@pytest.mark.parametrize("mode, reason", [
+    ("refuse", "turn stopped: refusal"),
+    ("silent", "no reply text"),
+    ("die", "exited before answering initialize"),
+])
+def test_acp_failures_become_a_non_zero_rc(agentd, home, fake_acp, mode,
+                                           reason):
+    rc, _, err, _ = acp(agentd, home, fake_acp, agentd.AcpTurn("go", None),
+                        mode=mode)
+    assert rc != 0 and reason in err
+    if mode == "die":
+        assert rc == 3 and "not authenticated" in err
+
+
+def test_acp_long_lines_survive(agentd, home, fake_acp):
+    rc, out, _, a = acp(agentd, home, fake_acp, agentd.AcpTurn("go", None),
+                        mode="long")
+    assert rc == 0 and a.parse(out, "/lm")[0] == "x" * 200_000
+
+
+def test_acp_timeout_is_reported_like_any_other(agentd, home, fake_acp):
+    with pytest.raises(RuntimeError, match=r"timed out after 0\.5s"):
+        acp(agentd, home, fake_acp, agentd.AcpTurn("go", None), mode="hang",
+            timeout=0.5)
 
 
 # --- CliAgentExecutor.execute: the A2A envelope ---------------------------
@@ -633,6 +868,8 @@ def test_main_refuses_a_bad_configuration(agentd, home, monkeypatch):
          "env_from_pass must map"),
         ("[kimi]\nkind = \"kimi\"\nport = 1\nenv = { A = 1 }\n",
          "env must map variable names to values"),
+        ("[kimi]\nkind = \"cline\"\nport = 1\nextra_args = [\"-m\", \"x\"]\n",
+         r"\[kimi\] cline's ACP mode ignores -m"),
     ]:
         agentd.CONFIG_FILE.write_text(text)
         with pytest.raises(SystemExit, match=message):

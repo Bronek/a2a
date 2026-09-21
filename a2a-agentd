@@ -6,7 +6,8 @@
 #   "uvicorn>=0.30,<1",
 # ]
 # ///
-"""A2A daemon wrapping a local agent CLI (claude / gemini / codex / kimi).
+"""A2A daemon wrapping a local agent CLI (claude / gemini / codex / kimi /
+cline).
 
 Usage: a2a-agentd <agent-name>
 
@@ -17,6 +18,7 @@ cannot drive the agents. A2A context ids map to native CLI session ids,
 persisted in ~/.local/state/a2a-agents/<agent>.json.
 """
 import asyncio
+import dataclasses
 import json
 import os
 import secrets
@@ -137,10 +139,25 @@ def check_stanza(cfg: dict) -> None:
                 f"{key} must map variable names to {values}, not {env!r}")
 
 
+@dataclasses.dataclass(frozen=True)
+class AcpTurn:
+    """A turn for a CLI driven over the Agent Client Protocol rather than
+    its command line. cline's ACP mode takes the prompt and the choice of
+    session as JSON-RPC requests on stdin, and the prompt cannot be sent
+    before the session's id is known, so build() hands this to _invoke in
+    place of a stdin text and the exchange happens there."""
+    prompt: str
+    session: str | None  # None starts a fresh session
+
+
 class CliAdapter:
     """Build argv and parse output for one CLI flavour."""
 
-    KINDS = ("claude", "gemini", "codex", "kimi")
+    KINDS = ("claude", "gemini", "codex", "kimi", "cline")
+    # cline's ACP mode reads only --acp and --auto-approve from the command
+    # line. These parse, and then do nothing: a model chosen with them
+    # would silently be some other model.
+    CLINE_IGNORED = ("-P", "--provider", "-m", "--model", "-k", "--key")
 
     def __init__(self, kind: str, command: str, extra_args: list[str]):
         if kind not in self.KINDS:
@@ -149,17 +166,26 @@ class CliAdapter:
             # the worse way to learn about a typo in agents.toml.
             raise ValueError(f"unknown adapter kind {kind!r} "
                              f"(one of: {', '.join(self.KINDS)})")
+        if kind == "cline":
+            ignored = [a for a in extra_args if a in self.CLINE_IGNORED]
+            if ignored:
+                raise ValueError(
+                    f"cline's ACP mode ignores {', '.join(ignored)}: choose "
+                    f"the provider and model with CLINE_PROVIDER and "
+                    f"CLINE_MODEL in env, and the key with CLINE_API_KEY in "
+                    f"env_from_pass")
         self.kind = kind
         self.command = command
         self.extra = extra_args
 
     def chooses_own_id(self) -> bool:
         # claude and gemini accept a caller-chosen --session-id;
-        # codex and kimi mint their own, discovered from output.
-        return self.kind in ("codex", "kimi")
+        # codex, kimi and cline mint their own, discovered from output.
+        return self.kind in ("codex", "kimi", "cline")
 
     def build(self, prompt: str, native_id: str | None, resume: bool,
-              lastmsg: str, trusted: bool = False) -> tuple[list[str], str | None]:
+              lastmsg: str, trusted: bool = False,
+              ) -> tuple[list[str], str | AcpTurn | None]:
         """Return (argv, stdin_text). The prompt travels via stdin where the
         CLI supports it, keeping it out of /proc/<pid>/cmdline."""
         c = self.command
@@ -191,6 +217,12 @@ class CliAdapter:
             sel = ["-r", native_id] if resume else []
             return [c, *sel, "--output-format", "stream-json", *self.extra,
                     "-p", prompt], None
+        if self.kind == "cline":
+            # The Agent Client Protocol over stdio: prompt and session go
+            # as JSON-RPC requests, exchanged in _invoke. cline's own
+            # --id would resume as well, but only on a terminal.
+            return [c, "--acp", *self.extra], AcpTurn(
+                prompt, native_id if resume else None)
         raise ValueError(f"unknown adapter kind: {self.kind}")
 
     def parse(self, stdout: str, lastmsg: str) -> tuple[str, str | None]:
@@ -235,6 +267,31 @@ class CliAdapter:
                         ev.get("content"), str):
                     texts.append(ev["content"])
             return "\n".join(texts), sid
+        if self.kind == "cline":
+            # The ACP exchange's transcript: the responses to the daemon's
+            # requests, one of which carries a new session's id, and this
+            # turn's session/update notifications, whose message chunks
+            # are fragments of one stream and concatenate into the reply.
+            sid, texts = None, []
+            for line in stdout.splitlines():
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                result = ev.get("result")
+                if isinstance(result, dict) and isinstance(
+                        result.get("sessionId"), str):
+                    sid = result["sessionId"]
+                if ev.get("method") != "session/update":
+                    continue
+                update = (ev.get("params") or {}).get("update") or {}
+                content = update.get("content") or {}
+                if (update.get("sessionUpdate") == "agent_message_chunk"
+                        and content.get("type") == "text"):
+                    texts.append(content.get("text", ""))
+            return "".join(texts), sid
         raise ValueError(f"unknown adapter kind: {self.kind}")
 
     def error_hint(self, stdout: str, cli_only: bool = False) -> str:
@@ -518,6 +575,7 @@ class CliAgentExecutor(AgentExecutor):
                     "invalid session" in low          # gemini
                     or "no conversation found" in low  # claude
                     or "session not found" in low
+                    or "resource not found" in low    # cline (ACP)
                     or "different directory" in low):  # kimi
                 # NB deliberately narrow: a bare "not found" in stderr must
                 # not repoint the context and orphan a healthy session
@@ -567,17 +625,27 @@ class CliAgentExecutor(AgentExecutor):
         log(f"[{ctx_id!r}] done in {dt:.0f}s native={native} reply={len(text)}ch")
         return text, native
 
-    async def _invoke(self, cmd: list[str], stdin_text: str | None,
+    async def _invoke(self, cmd: list[str], stdin_text: str | AcpTurn | None,
                       env: dict, timeout: float,
                       cwd: str) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=cwd, env=env, start_new_session=True,
             stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            # An ACP notification carries a whole tool result on one line;
+            # the reader's default 64 KiB line limit would fail the turn.
+            limit=64 * 1024 * 1024)
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(stdin_text.encode() if stdin_text else None),
-                timeout=timeout)
+            if isinstance(stdin_text, AcpTurn):
+                result = await asyncio.wait_for(
+                    self._acp_exchange(proc, stdin_text, cwd), timeout=timeout)
+            else:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(
+                        stdin_text.encode() if stdin_text else None),
+                    timeout=timeout)
+                result = (proc.returncode, stdout.decode(errors="replace"),
+                          stderr.decode(errors="replace"))
         except TimeoutError:
             # SIGKILL the whole process group, not just the CLI wrapper, so
             # tools the agent spawned do not outlive the failed turn. The
@@ -589,8 +657,134 @@ class CliAgentExecutor(AgentExecutor):
                 proc.kill()
             await proc.wait()
             raise TurnFailed(f"timed out after {timeout:g}s") from None
-        return (proc.returncode, stdout.decode(errors="replace"),
-                stderr.decode(errors="replace"))
+        return result
+
+    async def _acp_exchange(self, proc, turn: AcpTurn,
+                            cwd: str) -> tuple[int, str, str]:
+        """One turn over the Agent Client Protocol: JSON-RPC 2.0, a message
+        per line, both ways on the CLI's stdio. Returns the (rc, stdout,
+        stderr) triple a plain run returns. stdout is a transcript of the
+        agent's responses and of this turn's notifications: a resumed
+        session replays its history before answering session/load, and
+        that history is not part of this reply. A failure the protocol
+        reports, such as a session the agent no longer has or a turn that
+        stopped for another reason than finishing, becomes a non-zero rc
+        with the reason on stderr, since the process itself exits 0."""
+        stderr_task = asyncio.ensure_future(proc.stderr.read())
+        transcript: list[str] = []
+        next_id = 0
+        saw_text = False
+
+        class Stop(Exception):
+            """The turn cannot proceed; the message is the reason."""
+
+        async def send(message: dict) -> None:
+            try:
+                proc.stdin.write((json.dumps(message) + "\n").encode())
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the agent is gone; the next read sees its EOF
+
+        async def request(method: str, params: dict) -> dict:
+            """Send one request and read up to its response, keeping the
+            prompt's notifications on the way, and answering the agent's
+            own requests so the exchange can never stall on one."""
+            nonlocal next_id, saw_text
+            next_id += 1
+            rid = next_id
+            await send({"jsonrpc": "2.0", "id": rid, "method": method,
+                        "params": params})
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    raise Stop(f"exited before answering {method}")
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                text = line.decode(errors="replace").rstrip("\n")
+                if "method" in ev:
+                    if "id" in ev:
+                        await send(self._acp_answer(ev))
+                    elif method == "session/prompt":
+                        transcript.append(text)
+                        update = (ev.get("params") or {}).get("update") or {}
+                        content = update.get("content") or {}
+                        if (update.get("sessionUpdate") == "agent_message_chunk"
+                                and content.get("text")):
+                            saw_text = True
+                elif ev.get("id") == rid:
+                    transcript.append(text)
+                    if "error" in ev:
+                        err = ev["error"]
+                        raise Stop(f"{method}: "
+                                   f"{(err or {}).get('message') or err}")
+                    return ev
+
+        failure = ""
+        try:
+            try:
+                await request("initialize", {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {
+                        "fs": {"readTextFile": False, "writeTextFile": False},
+                        "terminal": False}})
+                if turn.session:
+                    await request("session/load", {
+                        "sessionId": turn.session, "cwd": cwd,
+                        "mcpServers": []})
+                    sid = turn.session
+                else:
+                    resp = await request("session/new",
+                                         {"cwd": cwd, "mcpServers": []})
+                    sid = (resp.get("result") or {}).get("sessionId")
+                    if not isinstance(sid, str) or not sid:
+                        raise Stop("session/new returned no session id")
+                resp = await request("session/prompt", {
+                    "sessionId": sid,
+                    "prompt": [{"type": "text", "text": turn.prompt}]})
+                stop = (resp.get("result") or {}).get("stopReason")
+                if stop != "end_turn":
+                    raise Stop(f"turn stopped: {stop}")
+                if not saw_text:
+                    raise Stop("turn ended with no reply text; a provider, "
+                               "model or API key cline cannot use fails "
+                               "this way, silently")
+            except Stop as err:
+                failure = str(err)
+            proc.stdin.close()
+            await proc.wait()
+            stderr = (await stderr_task).decode(errors="replace")
+        except asyncio.CancelledError:
+            # The timeout path: _invoke kills the process group next, and
+            # nothing must wait on the process before it does.
+            stderr_task.cancel()
+            raise
+        rc = proc.returncode
+        if failure:
+            rc = rc or 1
+            stderr = f"{stderr.rstrip()}\n{failure}".strip()
+        return rc, "\n".join(transcript), stderr
+
+    @staticmethod
+    def _acp_answer(req: dict) -> dict:
+        """The daemon is a client with nothing to offer: it refuses each
+        permission request — with auto-approval configured none arrives —
+        and reports every other request as unsupported."""
+        rid = req.get("id")
+        if req.get("method") == "session/request_permission":
+            options = (req.get("params") or {}).get("options") or []
+            reject = [o for o in options
+                      if str(o.get("kind", "")).startswith("reject")]
+            outcome = ({"outcome": "selected",
+                        "optionId": reject[0].get("optionId")}
+                       if reject else {"outcome": "cancelled"})
+            return {"jsonrpc": "2.0", "id": rid, "result": {"outcome": outcome}}
+        return {"jsonrpc": "2.0", "id": rid, "error": {
+            "code": -32601,
+            "message": f"{req.get('method')} is not supported by this client"}}
 
     async def cancel(self, context: RequestContext,
                      event_queue: EventQueue) -> None:

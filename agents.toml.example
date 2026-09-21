@@ -3,7 +3,7 @@
 # does not exist yet; edit the copy, not this example.
 #
 # Per-agent keys:
-#   kind          adapter: "claude" | "gemini" | "codex" | "kimi"
+#   kind          adapter: "claude" | "gemini" | "codex" | "kimi" | "cline"
 #   command       CLI binary to run
 #   port          loopback port for the A2A daemon
 #   trusted_workdirs  gemini only: directories (each trusting its whole
@@ -56,3 +56,16 @@ kind = "kimi"
 command = "kimi"
 port = 8004
 extra_args = []
+
+[glm]
+kind = "cline"
+command = "cline"
+port = 8005
+# Driven over cline's Agent Client Protocol (--acp), which ignores the
+# CLI's provider and model flags: the model is chosen here, and the
+# provider's key comes from pass. Another model is another stanza.
+env = { CLINE_PROVIDER = "zai-coding-plan", CLINE_MODEL = "glm-5.3" }
+env_from_pass = { CLINE_API_KEY = "zai/api-key" }
+# Without auto-approval the daemon refuses every permission request a tool
+# call raises, which leaves a worker that can only talk.
+extra_args = ["--auto-approve", "true"]
