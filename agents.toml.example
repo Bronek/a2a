@@ -10,6 +10,9 @@
 #                 subtree) whose pinned contexts get --skip-trust
 #   timeout       seconds before a task is killed (default 1800)
 #   extra_args    appended to every invocation, e.g. permission/approval modes
+#   env           VAR = "value" — plain environment for this agent's
+#                 subprocess, for settings a CLI takes from its environment
+#                 rather than its flags; never a secret, this file is readable
 #   env_from_pass VAR = "pass entry" — resolved with pass(1) per task, only for
 #                 this agent's subprocess, never stored or logged
 

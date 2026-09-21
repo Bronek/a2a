@@ -128,11 +128,13 @@ def check_stanza(cfg: dict) -> None:
         val = cfg.get(key, [])
         if not (isinstance(val, list) and all(isinstance(v, str) for v in val)):
             raise ValueError(f"{key} must be a list of strings, not {val!r}")
-    env = cfg.get("env_from_pass", {})
-    if not (isinstance(env, dict) and all(
-            isinstance(k, str) and isinstance(v, str) for k, v in env.items())):
-        raise ValueError(
-            f"env_from_pass must map variable names to pass entries, not {env!r}")
+    for key, values in (("env", "values"), ("env_from_pass", "pass entries")):
+        env = cfg.get(key, {})
+        if not (isinstance(env, dict) and all(
+                isinstance(k, str) and isinstance(v, str)
+                for k, v in env.items())):
+            raise ValueError(
+                f"{key} must map variable names to {values}, not {env!r}")
 
 
 class CliAdapter:
@@ -476,6 +478,9 @@ class CliAgentExecutor(AgentExecutor):
         # a2a-mcp `spool` can self-identify its sender.
         env["A2A_AGENT"] = self.name
         env["A2A_CONTEXT"] = ctx_id
+        # Plain settings first, secrets last: a value from pass is never
+        # shadowed by a plaintext one that names the same variable.
+        env.update(self.cfg.get("env", {}))
         if self.cfg.get("env_from_pass"):
             env.update(await asyncio.to_thread(
                 resolve_pass_env, self.cfg["env_from_pass"]))

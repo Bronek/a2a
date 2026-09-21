@@ -307,6 +307,19 @@ def test_first_turn_pins_and_records(agentd, dirs):
     assert json.loads(ex.state_file.read_text()) == ex.sessions
 
 
+def test_stanza_env_reaches_the_cli_and_pass_wins(agentd, dirs, monkeypatch):
+    ex = executor(agentd, {"env": {"CLI_MODEL": "m", "CLI_KEY": "plain"},
+                           "env_from_pass": {"CLI_KEY": "entry"}})
+    monkeypatch.setattr(agentd, "resolve_pass_env",
+                        lambda mapping: {var: f"from-pass:{entry}"
+                                         for var, entry in mapping.items()})
+    ex._invoke = FakeCli(claude_ok("hi", DETERMINISTIC))
+    run(ex, "ctx", "hello", str(dirs.real))
+    [call] = ex._invoke.calls
+    assert call.env["CLI_MODEL"] == "m"
+    assert call.env["CLI_KEY"] == "from-pass:entry"
+
+
 def test_second_turn_resumes(agentd, dirs):
     ex = executor(agentd)
     ex.sessions["ctx"] = {"session": "s1", "workdir": str(dirs.real)}
@@ -618,6 +631,8 @@ def test_main_refuses_a_bad_configuration(agentd, home, monkeypatch):
          "command must be a string"),
         ("[kimi]\nkind = \"kimi\"\nport = 1\nenv_from_pass = \"x\"\n",
          "env_from_pass must map"),
+        ("[kimi]\nkind = \"kimi\"\nport = 1\nenv = { A = 1 }\n",
+         "env must map variable names to values"),
     ]:
         agentd.CONFIG_FILE.write_text(text)
         with pytest.raises(SystemExit, match=message):
