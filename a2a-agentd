@@ -153,7 +153,7 @@ class AcpTurn:
 class CliAdapter:
     """Build argv and parse output for one CLI flavour."""
 
-    KINDS = ("claude", "gemini", "codex", "kimi", "cline")
+    KINDS = ("claude", "gemini", "codex", "kimi", "cline", "cursor")
     # cline's ACP mode reads only --acp and --auto-approve from the command
     # line. These parse, and then do nothing: a model chosen with them
     # would silently be some other model.
@@ -180,8 +180,8 @@ class CliAdapter:
 
     def chooses_own_id(self) -> bool:
         # claude and gemini accept a caller-chosen --session-id;
-        # codex, kimi and cline mint their own, discovered from output.
-        return self.kind in ("codex", "kimi", "cline")
+        # codex, kimi, cline and cursor mint their own, discovered from output.
+        return self.kind in ("codex", "kimi", "cline", "cursor")
 
     def build(self, prompt: str, native_id: str | None, resume: bool,
               lastmsg: str, trusted: bool = False,
@@ -189,6 +189,11 @@ class CliAdapter:
         """Return (argv, stdin_text). The prompt travels via stdin where the
         CLI supports it, keeping it out of /proc/<pid>/cmdline."""
         c = self.command
+        if self.kind == "cursor":
+            sel = ["--resume", native_id] if resume else []
+            trust = ["--trust"] if trusted else []
+            return [c, "--print", "--output-format", "json",
+                    *sel, *trust, *self.extra], prompt
         if self.kind == "claude":
             sel = ["--resume", native_id] if resume else ["--session-id", native_id]
             return [c, "-p", "--output-format", "json", *sel, *self.extra], prompt
@@ -227,7 +232,7 @@ class CliAdapter:
 
     def parse(self, stdout: str, lastmsg: str) -> tuple[str, str | None]:
         """Return (reply_text, native_session_id or None if unchanged)."""
-        if self.kind == "claude":
+        if self.kind in ("claude", "cursor"):
             j = json.loads(stdout)
             return j.get("result", ""), j.get("session_id")
         if self.kind == "gemini":
@@ -338,7 +343,8 @@ class CliAgentExecutor(AgentExecutor):
         self.cfg = cfg
         self.adapter = CliAdapter(cfg["kind"], cfg.get("command", name),
                                   cfg.get("extra_args", []))
-        # gemini only: each entry trusts that directory and its whole subtree.
+        # Each entry trusts that directory and its whole subtree for CLIs
+        # with a workspace trust gate (gemini and cursor).
         # Resolved, because the subtree test below is lexical: an unresolved
         # entry would both admit paths outside the tree and miss legitimate
         # ones reached through a symlink.

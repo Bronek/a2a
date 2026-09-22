@@ -29,7 +29,7 @@ The bridge has to be registered with each CLI, and each CLI then has to be told 
 | **claude** | `claude mcp add --scope user a2a -- a2a-mcp` | `extra_args = ["--allowedTools", "mcp__a2a"]` |
 | **gemini** | `gemini mcp add -s user a2a a2a-mcp` | `"trust": true` on the `a2a` server in `~/.gemini/settings.json`, plus `extra_args = ["--allowed-mcp-server-names", "a2a"]` |
 | **codex** | `codex mcp add a2a -- a2a-mcp` | `extra_args = ["--approve-for-me", "--disable", "apps"]` |
-| **kimi** | `~/.kimi-code/mcp.json` (no `mcp` subcommand) | `[[permission.rules]]` with `decision = "allow"`, `pattern = "mcp__a2a__*"` in `~/.kimi-code/config.toml` |
+| **Kimi Code** (`kind = "kimi"`) | `~/.kimi-code/mcp.json` (no `mcp` subcommand) | `[[permission.rules]]` with `decision = "allow"`, `pattern = "mcp__a2a__*"` in `~/.kimi-code/config.toml` |
 | **glm** (cline) | `cline mcp install --yes a2a -- a2a-mcp` | `extra_args = ["--auto-approve", "true"]` |
 
 `extra_args` means the agent's stanza in `~/.config/a2a-agents/agents.toml`. Registration is at user scope throughout, so the bridge loads in any working directory and no project needs its own `.mcp.json`. This repository carries one anyway, for Claude Code sessions opened here; it finds `a2a-mcp` through `PATH`, so `make install` must have run.
@@ -39,8 +39,23 @@ Each grant is narrower or wider than it looks:
 - **claude** names the mesh tools so they are pre-approved. That is a grant and nothing more: it leaves the worker's other capabilities untouched, and those are broader than they appear. See the table below.
 - **gemini** needs the trust flag because headless `gemini` cannot answer an approval prompt. Set it globally, one edit that auto-approves the mesh tools in every directory gemini visits, or per project through a `.mcp.json` that limits the grant to the workspaces carrying it. Either is acceptable here: the tools only reach the local mesh, and the receiving workers keep their own permission gates, which is the boundary that matters.
 - **codex** is the awkward one. Headless `exec` pins `approval_policy` to `never`, which refuses anything needing approval rather than waving it through, MCP tool calls included. `--approve-for-me` routes approvals to codex's automatic reviewer instead, at the price of a workspace-write sandbox, and `--disable apps` strips the built-in ChatGPT-apps suite from a worker that has no use for it. Codex also scrubs the environment it hands MCP servers, so its spooled mail should name its `sender` explicitly.
-- **kimi** cannot answer prompts headless either, hence the allow rule. Its registration lives at user level so it loads without the workspace-trust prompt that a project-level `.kimi-code/mcp.json` would raise.
+- **Kimi Code** cannot answer prompts headless either, hence the allow rule. Its registration lives at user level so it loads without the workspace-trust prompt that a project-level `.kimi-code/mcp.json` would raise.
 - **glm** is the cline CLI on z.ai's model, driven over cline's Agent Client Protocol because its headless JSON mode cannot resume a session. ACP reads only `--acp` and `--auto-approve` from the command line, so the stanza chooses the provider and model through `env`, as `CLINE_PROVIDER` and `CLINE_MODEL`, and the provider's key through `env_from_pass`, as `CLINE_API_KEY`; the daemon refuses the flags that would silently pick some other model. Another model is another stanza of the same kind. Without auto-approval the daemon answers every permission request with a refusal, which leaves a worker that can only talk. Like codex, cline scrubs the environment it hands MCP servers, so its spooled mail should name its `sender`.
+
+### Kimi K3 through Cursor Agent
+
+The example's `kimi` service runs the `agent` binary with `kind = "cursor"`
+and `extra_args = ["--model", "kimi-k3-max"]`. Log in with `agent login`.
+Set `trusted_workdirs` to the workspace trees this service may trust; the
+adapter passes `--trust` only inside those trees. Cursor's own trust settings
+apply elsewhere. Tool permissions remain Cursor's defaults; the service does
+not add `--force` or `--yolo`.
+
+The adapter sends prompts through stdin, reads JSON replies, and resumes the
+returned session ID with `agent --resume <id>`. The `kimi` adapter kind remains
+available for the separate Kimi Code CLI; its MCP setup and permission results
+below describe that CLI, not Cursor Agent. Existing Kimi Code conversations
+cannot be resumed by Cursor; use fresh context names when switching adapters.
 
 ### What a headless worker can actually do
 
@@ -49,7 +64,7 @@ Measure it; do not read it off the flags. Each CLI decides for itself what "ther
 | Agent | File read | Shell execution | File write | Mesh tools | Effective scope |
 |---|---|---|---|---|---|
 | **claude** | yes | yes | yes | yes | Unrestricted, including outside the pinned workdir |
-| **kimi** | yes | yes | yes | yes | Unrestricted, and wider than the same CLI run interactively |
+| **Kimi Code** (`kind = "kimi"`) | yes | yes | yes | yes | Unrestricted, and wider than the same CLI run interactively |
 | **codex** | yes | auto-reviewed | auto-reviewed | yes | Approvals go to an automatic reviewer, in a workspace-write sandbox |
 | **gemini** | yes | – | – | yes | No shell or write tool exists; read and mesh tools only |
 | **glm** | yes | yes | yes | yes | Unrestricted, including outside the pinned workdir |
@@ -93,7 +108,7 @@ tail -f ~/.local/state/a2a-agents/claude.log   # progress of one agent
 
 ## Sessions
 
-Every A2A `contextId` maps to a native CLI session. A conversation therefore survives daemon restarts, and it can be opened directly in the CLI that owns it, `claude --resume <id>`, `kimi -r <id>`, `cline --id <id>` and so on; the client prints the native id. Claude and Gemini accept a caller-chosen session UUID, derived deterministically from the context id. Codex, Kimi and cline mint their own, which the daemon captures from their output. The mapping is persisted in `~/.local/state/a2a-agents/<agent>.json`. Turns within one context are serialised: concurrent requests to the same conversation queue rather than race.
+Every A2A `contextId` maps to a native CLI session. A conversation therefore survives daemon restarts, and it can be opened directly in the CLI that owns it, `claude --resume <id>`, `kimi -r <id>`, `cline --id <id>` and so on; the client prints the native id. Claude and Gemini accept a caller-chosen session UUID, derived deterministically from the context id. Codex, Kimi, Cursor and cline mint their own, which the daemon captures from their output. The mapping is persisted in `~/.local/state/a2a-agents/<agent>.json`. Turns within one context are serialised: concurrent requests to the same conversation queue rather than race.
 
 A context also pins its working directory, on its first message and for life. Several CLIs scope their session stores to the directory they run in, so moving a conversation would orphan its session. A new context refuses to start without one. Pass it as message metadata `{"workdir": "/path"}`: `a2a-send --workdir`, or `--here` for the current directory; the `workdir` argument of the MCP `send` tool; or, in A2A Inspector, the Message Metadata field on the chat's first message. The client expands and resolves the path where you are, rather than at the daemon's own directory, which is `~` and not the project you meant. A relative path or symlink is therefore pinned to the resolved directory it identified when the context was created. A different directory means a new context name.
 

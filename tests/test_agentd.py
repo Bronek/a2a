@@ -67,6 +67,35 @@ def test_kimi_prompt_travels_in_argv(agentd):
     assert argv[1:3] == ["-r", "s1"]
 
 
+def test_cursor_model_stdin_resume_and_workspace_trust(agentd):
+    a = agentd.CliAdapter("cursor", "agent", ["--model", "kimi-k3-max"])
+    for resume in (False, True):
+        for trusted in (False, True):
+            argv, stdin = a.build("secret", "sid", resume, "/lm", trusted)
+            assert argv[0] == "agent"
+            assert "--print" in argv
+            assert argv[argv.index("--output-format") + 1] == "json"
+            assert argv[argv.index("--model") + 1] == "kimi-k3-max"
+            assert stdin == "secret" and "secret" not in argv
+            assert ("--trust" in argv) == trusted
+            assert ("--resume" in argv) == resume
+            if resume:
+                assert argv[argv.index("--resume") + 1] == "sid"
+
+
+def test_parse_cursor_reply_and_native_session(agentd):
+    a = adapter(agentd, "cursor")
+    assert a.chooses_own_id()
+    result = {"type": "result", "subtype": "success", "is_error": False,
+              "result": "A2A_OK", "session_id": "native-session",
+              "usage": {"inputTokens": 42}}
+    for indent in (None, 2):
+        assert a.parse(json.dumps(result, indent=indent), "/lm") == (
+            result["result"], result["session_id"])
+    with pytest.raises(ValueError):
+        a.parse("not json", "/lm")
+
+
 def test_cline_argv_and_turn(agentd):
     a = adapter(agentd, "cline", ["--auto-approve", "true"])
     argv, turn = a.build("hello", None, resume=False, lastmsg="/lm")

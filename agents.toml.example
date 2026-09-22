@@ -3,11 +3,11 @@
 # does not exist yet; edit the copy, not this example.
 #
 # Per-agent keys:
-#   kind          adapter: "claude" | "gemini" | "codex" | "kimi" | "cline"
+#   kind          adapter: "claude" | "gemini" | "codex" | "kimi" | "cline" | "cursor"
 #   command       CLI binary to run
 #   port          loopback port for the A2A daemon
-#   trusted_workdirs  gemini only: directories (each trusting its whole
-#                 subtree) whose pinned contexts get --skip-trust
+#   trusted_workdirs  gemini/cursor: directories (each trusting its whole
+#                 subtree) whose pinned contexts get --skip-trust/--trust
 #   timeout       seconds before a task is killed (default 1800)
 #   extra_args    appended to every invocation, e.g. permission/approval modes
 #   env           VAR = "value" — plain environment for this agent's
@@ -52,10 +52,12 @@ extra_args = ["-c", "model_reasoning_effort=high",
               "--approve-for-me", "--disable", "apps"]
 
 [kimi]
-kind = "kimi"
-command = "kimi"
+kind = "cursor"
+command = "agent"
 port = 8004
-extra_args = []
+# Cursor Agent serves Kimi K3. Trust only workspace trees you control.
+# trusted_workdirs = ["~/gits"]
+extra_args = ["--model", "kimi-k3-max"]
 
 [glm]
 kind = "cline"
